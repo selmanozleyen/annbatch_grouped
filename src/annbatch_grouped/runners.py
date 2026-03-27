@@ -135,7 +135,8 @@ def write_grouped_store(
 
 def benchmark_categorical_loader(
     store_path: Path,
-    profile: CategoryProfile,
+    groupby_key: str,
+    profile_name: str,
     batch_size: int,
     chunk_size: int,
     preload_nchunks: int,
@@ -146,7 +147,7 @@ def benchmark_categorical_loader(
     def load_func(g: zarr.Group) -> ad.AnnData:
         return ad.AnnData(
             X=ad.io.sparse_dataset(g["X"]),
-            obs=ad.io.read_elem(g["obs"])[[profile.groupby_key]],
+            obs=ad.io.read_elem(g["obs"])[[groupby_key]],
         )
 
     collection = GroupedCollection(str(store_path), mode="r")
@@ -167,7 +168,7 @@ def benchmark_categorical_loader(
         n_batches=n_batches,
         batch_size=batch_size,
         loader_name="annbatch_categorical",
-        profile_name=profile.name,
+        profile_name=profile_name,
         extra={"chunk_size": chunk_size, "preload_nchunks": preload_nchunks},
     )
 

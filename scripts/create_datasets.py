@@ -1,20 +1,25 @@
-"""Create datasets: generate synthetic AnnData and write GroupedCollection stores.
+"""Create datasets: generate synthetic AnnData or convert existing files to
+GroupedCollection stores.
 
-Separates the expensive write step from benchmarking.  By default all
-predefined profiles are created; use --profiles to select a subset.
+By default all predefined synthetic profiles are created; use --profiles to
+select a subset.  Use --from_path to convert a real dataset (h5ad, zarr, etc.)
+instead.
 
 Usage:
     python scripts/create_datasets.py
     python scripts/create_datasets.py --profiles tahoe_like few_categories
     python scripts/create_datasets.py --n_obs 1000000 --yes
+    python scripts/create_datasets.py --from_path /data/tahoe.h5ad --groupby_key cell_line --name tahoe
 """
 from __future__ import annotations
 
+import os
 import shutil
 import time
 from pathlib import Path
 
 import click
+import numpy as np
 
 from annbatch_grouped.data_gen import (
     ALL_PROFILES,
@@ -30,6 +35,16 @@ from annbatch_grouped.plotting import plot_category_distribution
 
 PROFILE_MAP = {p.name: p for p in ALL_PROFILES}
 
+
+def _fmt_bytes(b: int) -> str:
+    if b >= 1 << 30:
+        return f"{b / (1 << 30):.1f} GB"
+    if b >= 1 << 20:
+        return f"{b / (1 << 20):.0f} MB"
+    return f"{b / (1 << 10):.0f} KB"
+
+
+# ---- synthetic profile helpers -------------------------------------------
 
 def _print_profile_plan(
     profiles: list[CategoryProfile],
@@ -58,18 +73,10 @@ def _print_profile_plan(
         print(f"  {p.name:<25} {p.n_obs:>12,} {p.n_vars:>8,} {p.n_categories:>5} "
               f"{p.distribution:<18} {sz['mem_human']:>10} {sz['disk_human']:>10}")
 
-    def _fmt(b: int) -> str:
-        if b >= 1 << 30:
-            return f"{b / (1 << 30):.1f} GB"
-        if b >= 1 << 20:
-            return f"{b / (1 << 20):.0f} MB"
-        return f"{b / (1 << 10):.0f} KB"
-
     print(f"  {'-'*90}")
     print(f"  {'TOTAL':<25} {'':>12} {'':>8} {'':>5} "
-          f"{'':>18} {_fmt(total_mem):>10} {_fmt(total_disk):>10}")
+          f"{'':>18} {_fmt_bytes(total_mem):>10} {_fmt_bytes(total_disk):>10}")
 
-    # Per-profile distribution info
     print(f"\n  Category distribution summaries:")
     for p in profiles:
         s = profile_summary(p)
@@ -81,7 +88,7 @@ def _print_profile_plan(
     print()
 
 
-def _create_single(
+def _create_single_synthetic(
     profile: CategoryProfile,
     store_base: Path,
     chunk_size: int,
@@ -115,23 +122,138 @@ def _create_single(
     print(f"  Store ready: {store_path}")
 
 
+# ---- real data helpers ----------------------------------------------------
+
+def _print_real_data_plan(
+    src_path: Path,
+    name: str,
+    groupby_key: str,
+    store_base: Path,
+    chunk_size: int,
+) -> None:
+    """Read just the metadata of a file and print what will happen."""
+    import anndata as ad
+
+    print(f"\n{'='*80}")
+    print("Dataset conversion plan")
+    print(f"{'='*80}")
+    print(f"  source:      {src_path}")
+    print(f"  store_dir:   {store_base}")
+    print(f"  store_name:  {name}.zarr")
+    print(f"  groupby_key: {groupby_key}")
+    print(f"  chunk_size:  {chunk_size}")
+
+    file_size = src_path.stat().st_size if src_path.is_file() else 0
+    if file_size:
+        print(f"  source size: {_fmt_bytes(file_size)}")
+
+    print(f"\n  Reading obs metadata from source ...")
+    adata = ad.read_h5ad(src_path, backed="r") if str(src_path).endswith(".h5ad") else ad.read(src_path)
+    n_obs, n_vars = adata.shape
+
+    if groupby_key not in adata.obs.columns:
+        avail = ", ".join(adata.obs.columns[:20])
+        if len(adata.obs.columns) > 20:
+            avail += ", ..."
+        click.echo(
+            f"\n  Error: groupby_key '{groupby_key}' not found in obs columns.\n"
+            f"  Available: {avail}",
+            err=True,
+        )
+        raise SystemExit(1)
+
+    counts = adata.obs[groupby_key].value_counts()
+    n_categories = len(counts)
+
+    print(f"\n  Dataset summary:")
+    print(f"    shape:           ({n_obs:,}, {n_vars:,})")
+    print(f"    n_categories:    {n_categories}")
+    print(f"    min_group_size:  {counts.min():,}")
+    print(f"    max_group_size:  {counts.max():,}")
+    print(f"    median_group:    {int(counts.median()):,}")
+    print(f"    imbalance_ratio: {counts.max() / max(counts.min(), 1):.1f}x")
+
+    top_n = min(10, n_categories)
+    print(f"\n  Top {top_n} categories:")
+    for cat, cnt in counts.head(top_n).items():
+        print(f"    {cat}: {cnt:,}")
+    if n_categories > top_n:
+        print(f"    ... and {n_categories - top_n} more")
+
+    if hasattr(adata, "file") and hasattr(adata.file, "close"):
+        adata.file.close()
+
+    print()
+
+
+def _create_from_path(
+    src_path: Path,
+    name: str,
+    groupby_key: str,
+    store_base: Path,
+    chunk_size: int,
+    plots_dir: Path | None,
+) -> None:
+    """Read a real dataset and write it as a GroupedCollection store."""
+    import anndata as ad
+
+    from annbatch_grouped.runners import write_grouped_store
+
+    store_path = store_base / f"{name}.zarr"
+
+    print(f"\n  Loading {src_path} ...")
+    t0 = time.perf_counter()
+    adata = ad.read(src_path)
+    load_time = time.perf_counter() - t0
+    print(f"  Loaded {adata.shape} in {load_time:.1f}s")
+
+    if plots_dir is not None:
+        counts = adata.obs[groupby_key].value_counts().values
+        sorted_counts = np.sort(counts)[::-1]
+        plot_path = plots_dir / f"dist_{name}.png"
+        plot_category_distribution(
+            sorted_counts, name, plot_path,
+            distribution_label=f"real ({groupby_key})",
+        )
+        print(f"  Saved distribution plot: {plot_path}")
+
+    if store_path.exists():
+        print(f"  Removing existing store: {store_path}")
+        shutil.rmtree(store_path)
+
+    write_grouped_store(adata, store_path, groupby_key, n_obs_per_chunk=chunk_size)
+    print(f"  Store ready: {store_path}")
+
+
+# ---- CLI ------------------------------------------------------------------
+
 @click.command()
+@click.option("--from_path", type=click.Path(exists=True), default=None,
+              help="Path to an existing dataset (h5ad, zarr, etc.) to convert "
+                   "instead of generating synthetic data.")
+@click.option("--name", type=str, default=None,
+              help="Store name for --from_path (default: stem of the input file)")
+@click.option("--groupby_key", type=str, default="cell_line",
+              help="obs column to group by (used with --from_path and synthetic profiles)")
 @click.option("--profiles", type=str, multiple=True, default=None,
-              help="Profile names to create (default: all). "
+              help="Synthetic profile names to create (default: all). "
                    f"Available: {', '.join(PROFILE_MAP)}")
 @click.option("--store_dir", type=str, default=None,
               help="Directory for zarr stores (default: DATA_DIR from paths.conf)")
 @click.option("--chunk_size", type=int, default=256,
               help="n_obs_per_chunk for GroupedCollection write")
 @click.option("--n_obs", type=int, default=None,
-              help="Override n_obs for all selected profiles")
+              help="Override n_obs for all selected synthetic profiles")
 @click.option("--n_vars", type=int, default=None,
-              help="Override n_vars for all selected profiles")
+              help="Override n_vars for all selected synthetic profiles")
 @click.option("--plots/--no-plots", default=True,
               help="Save distribution plots alongside stores")
 @click.option("--yes", "-y", is_flag=True, default=False,
               help="Skip confirmation prompt")
 def main(
+    from_path: str | None,
+    name: str | None,
+    groupby_key: str,
     profiles: tuple[str, ...],
     store_dir: str | None,
     chunk_size: int,
@@ -142,7 +264,38 @@ def main(
 ):
     store_base = Path(store_dir) if store_dir else DATA_DIR
     store_base.mkdir(parents=True, exist_ok=True)
+    plots_dir = (store_base / "plots") if plots else None
+    if plots_dir is not None:
+        plots_dir.mkdir(parents=True, exist_ok=True)
 
+    # -- real data path --
+    if from_path is not None:
+        if profiles:
+            click.echo("Error: --from_path and --profiles are mutually exclusive.", err=True)
+            raise SystemExit(1)
+
+        src = Path(from_path)
+        ds_name = name or src.stem
+        _print_real_data_plan(src, ds_name, groupby_key, store_base, chunk_size)
+
+        if not yes:
+            if not click.confirm("Proceed with dataset conversion?"):
+                click.echo("Aborted.")
+                raise SystemExit(0)
+
+        t0 = time.perf_counter()
+        _create_from_path(src, ds_name, groupby_key, store_base, chunk_size, plots_dir)
+        elapsed = time.perf_counter() - t0
+
+        print(f"\n{'='*80}")
+        print(f"Dataset '{ds_name}' created in {elapsed:.1f}s")
+        print(f"Store at: {store_base / f'{ds_name}.zarr'}")
+        if plots_dir:
+            print(f"Plots at: {plots_dir}")
+        print(f"{'='*80}")
+        return
+
+    # -- synthetic profiles path --
     if profiles:
         unknown = [p for p in profiles if p not in PROFILE_MAP]
         if unknown:
@@ -165,16 +318,12 @@ def main(
             click.echo("Aborted.")
             raise SystemExit(0)
 
-    plots_dir = store_base / "plots" if plots else None
-    if plots_dir is not None:
-        plots_dir.mkdir(parents=True, exist_ok=True)
-
     t_total = time.perf_counter()
     for i, profile in enumerate(selected, 1):
         print(f"\n{'='*60}")
         print(f"[{i}/{len(selected)}] Creating dataset: {profile.name}")
         print(f"{'='*60}")
-        _create_single(profile, store_base, chunk_size, plots_dir)
+        _create_single_synthetic(profile, store_base, chunk_size, plots_dir)
 
     elapsed = time.perf_counter() - t_total
     print(f"\n{'='*80}")

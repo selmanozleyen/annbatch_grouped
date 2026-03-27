@@ -4,7 +4,8 @@ Datasets must be created first with `python scripts/create_datasets.py`.
 
 Usage:
     python scripts/run_stress.py
-    python scripts/run_stress.py --profiles tahoe_like zipf_realistic
+    python scripts/run_stress.py --stores tahoe_like zipf_realistic
+    python scripts/run_stress.py --stores tahoe --groupby_key cell_line
 """
 from __future__ import annotations
 
@@ -18,11 +19,7 @@ from annbatch_grouped.bench_utils import (
     print_results_table,
     save_results,
 )
-from annbatch_grouped.data_gen import (
-    ALL_PROFILES,
-    CategoryProfile,
-    profile_summary,
-)
+from annbatch_grouped.data_gen import ALL_PROFILES
 from annbatch_grouped.paths import DATA_DIR, RESULTS_DIR
 from annbatch_grouped.plotting import plot_benchmark_comparison
 from annbatch_grouped.runners import benchmark_categorical_loader
@@ -31,45 +28,38 @@ from annbatch_grouped.runners import benchmark_categorical_loader
 PROFILE_MAP = {p.name: p for p in ALL_PROFILES}
 
 
-def _run_single_profile(
-    profile: CategoryProfile,
+def _run_single(
+    store_name: str,
+    groupby_key: str,
     batch_size: int,
     chunk_size: int,
     preload_nchunks: int,
     n_batches: int,
     store_base: Path,
 ) -> list[BenchmarkResult]:
-    """Run benchmark for a single profile whose store already exists."""
+    """Run benchmark for a single store that already exists."""
     results = []
-    store_path = store_base / f"{profile.name}.zarr"
+    store_path = store_base / f"{store_name}.zarr"
 
     if not store_path.exists():
-        print(f"\n  SKIPPING {profile.name}: store not found at {store_path}")
-        print(f"  Run 'python scripts/create_datasets.py --profiles {profile.name}' first.")
+        print(f"\n  SKIPPING {store_name}: store not found at {store_path}")
         return results
 
-    summary = profile_summary(profile)
     print(f"\n{'='*60}")
-    print(f"Profile: {profile.name}")
-    for k, v in summary.items():
-        print(f"  {k}: {v}")
-    print(f"  batch_size={batch_size}, chunk_size={chunk_size}, preload_nchunks={preload_nchunks}")
-
-    min_group = summary["min_group_size"]
-    if min_group < chunk_size:
-        print(f"  WARNING: min_group_size ({min_group}) < chunk_size ({chunk_size})")
-        print(f"  This may cause issues with CategoricalSampler")
+    print(f"Store: {store_name}")
+    print(f"  groupby_key={groupby_key}, batch_size={batch_size}, "
+          f"chunk_size={chunk_size}, preload_nchunks={preload_nchunks}")
 
     try:
         r = benchmark_categorical_loader(
             store_path=store_path,
-            profile=profile,
+            groupby_key=groupby_key,
+            profile_name=store_name,
             batch_size=batch_size,
             chunk_size=chunk_size,
             preload_nchunks=preload_nchunks,
             n_batches=n_batches,
         )
-        r.extra.update(summary)
         results.append(r)
         print(f"  {r.summary_line()}")
     except Exception as e:
@@ -77,10 +67,10 @@ def _run_single_profile(
         traceback.print_exc()
         results.append(BenchmarkResult(
             loader_name="annbatch_categorical",
-            profile_name=profile.name,
+            profile_name=store_name,
             n_batches=0, batch_size=batch_size,
             total_time_s=0, samples_per_sec=0,
-            extra={"error": str(e), **summary},
+            extra={"error": str(e)},
         ))
 
     return results
@@ -89,9 +79,12 @@ def _run_single_profile(
 @click.command()
 @click.option("--output_dir", type=str, default=None,
               help="Results directory (default: RESULTS_DIR/stress from paths.conf)")
-@click.option("--profiles", type=str, multiple=True, default=None,
-              help="Profile names to benchmark (default: all). "
-                   f"Available: {', '.join(PROFILE_MAP)}")
+@click.option("--stores", type=str, multiple=True, default=None,
+              help="Store names to benchmark (default: all predefined profiles). "
+                   "Can include custom stores created with --from_path.")
+@click.option("--groupby_key", type=str, default=None,
+              help="obs column used for grouping. Auto-detected for predefined "
+                   "profiles; required when --stores includes custom names.")
 @click.option("--batch_size", type=int, default=4096)
 @click.option("--chunk_size", type=int, default=256,
               help="Loader chunk_size for CategoricalSampler (read-side)")
@@ -101,7 +94,8 @@ def _run_single_profile(
               help="Directory containing zarr stores (default: DATA_DIR from paths.conf)")
 def main(
     output_dir: str | None,
-    profiles: tuple[str, ...],
+    stores: tuple[str, ...],
+    groupby_key: str | None,
     batch_size: int,
     chunk_size: int,
     preload_nchunks: int,
@@ -112,28 +106,35 @@ def main(
     results_base = Path(output_dir) if output_dir else RESULTS_DIR / "stress"
     store_base.mkdir(parents=True, exist_ok=True)
 
-    if profiles:
-        unknown = [p for p in profiles if p not in PROFILE_MAP]
-        if unknown:
-            click.echo(f"Error: unknown profile(s): {', '.join(unknown)}", err=True)
-            click.echo(f"Available: {', '.join(PROFILE_MAP)}", err=True)
-            raise SystemExit(1)
-        selected = [PROFILE_MAP[p] for p in profiles]
+    if stores:
+        store_names = list(stores)
     else:
-        selected = list(ALL_PROFILES)
+        store_names = [p.name for p in ALL_PROFILES]
+
+    custom_names = [s for s in store_names if s not in PROFILE_MAP]
+    if custom_names and groupby_key is None:
+        click.echo(
+            f"Error: --groupby_key is required for non-predefined stores: "
+            f"{', '.join(custom_names)}\n"
+            f"Predefined profiles (auto-detected): {', '.join(PROFILE_MAP)}",
+            err=True,
+        )
+        raise SystemExit(1)
 
     print("=" * 80)
     print("annbatch_grouped stress test")
     print("=" * 80)
     print(f"  store_dir:  {store_base}")
     print(f"  output_dir: {results_base}")
-    print(f"  profiles:   {', '.join(p.name for p in selected)}")
+    print(f"  stores:     {', '.join(store_names)}")
 
     all_results = []
-    for profile in selected:
+    for store_name in store_names:
+        key = groupby_key if groupby_key else PROFILE_MAP[store_name].groupby_key
         try:
-            results = _run_single_profile(
-                profile=profile,
+            results = _run_single(
+                store_name=store_name,
+                groupby_key=key,
                 batch_size=batch_size,
                 chunk_size=chunk_size,
                 preload_nchunks=preload_nchunks,
@@ -142,7 +143,7 @@ def main(
             )
             all_results.extend(results)
         except Exception:
-            print(f"\n  FATAL error on profile {profile.name}:")
+            print(f"\n  FATAL error on store {store_name}:")
             traceback.print_exc()
 
     if all_results:
