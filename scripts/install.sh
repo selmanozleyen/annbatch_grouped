@@ -19,7 +19,7 @@ parse_conf() {
     fi
 }
 
-ANNBATCH_REPO=$(parse_conf ANNBATCH_REPO "https://github.com/scverse/annbatch.git")
+ANNBATCH_REPO=$(parse_conf ANNBATCH_REPO "https://github.com/selmanozleyen/annbatch.git")
 ANNBATCH_REF=$(parse_conf ANNBATCH_REF "")
 
 # CLI arg overrides paths.conf
@@ -27,20 +27,26 @@ if [[ ${1:-} != "" ]]; then
     ANNBATCH_REF="$1"
 fi
 
+# ---------- Create venv if needed ----------
+if [[ ! -d .venv ]]; then
+    echo "=== Creating venv with uv ==="
+    uv venv --python 3.12
+fi
+
 # ---------- Install this package ----------
 echo "=== Installing annbatch_grouped (editable) ==="
-pip install -e ".[viz]"
+uv pip install -e ".[viz]"
 
 # ---------- Install zarrs for fast zarr I/O ----------
 echo ""
 echo "=== Ensuring zarrs is installed ==="
-pip install zarrs
+uv pip install zarrs
 
 # ---------- Install annbatch from git if ref is set ----------
 if [[ -n "$ANNBATCH_REF" ]]; then
     echo ""
     echo "=== Installing annbatch from ${ANNBATCH_REPO}@${ANNBATCH_REF} ==="
-    pip install "annbatch @ git+${ANNBATCH_REPO}@${ANNBATCH_REF}" --force-reinstall --no-deps
+    uv pip install "annbatch @ git+${ANNBATCH_REPO}@${ANNBATCH_REF}" --reinstall-package annbatch
     echo ""
     echo "Installed annbatch ref: ${ANNBATCH_REF}"
 else
@@ -49,7 +55,7 @@ else
 fi
 
 echo ""
-python -c "import annbatch; print(f'annbatch version: {annbatch.__version__}')" 2>/dev/null || true
-python -c "import zarrs; print('zarrs: OK')" 2>/dev/null || echo "WARNING: zarrs not available, using default zarr codec pipeline"
-python -c "import annbatch_grouped; print('annbatch_grouped: OK')"
+.venv/bin/python -c "import annbatch; print(f'annbatch version: {annbatch.__version__}')" 2>/dev/null || true
+.venv/bin/python -c "import zarrs; print('zarrs: OK')" 2>/dev/null || echo "WARNING: zarrs not available, using default zarr codec pipeline"
+.venv/bin/python -c "import annbatch_grouped; print('annbatch_grouped: OK')"
 echo "Done."
