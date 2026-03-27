@@ -287,6 +287,41 @@ def estimate_dataset_size(profile: CategoryProfile) -> dict:
     }
 
 
+def _x_n_vars(x_elem) -> int:
+    """Extract n_vars from an X element (dense array, sparse group, or zarr group)."""
+    if hasattr(x_elem, "ndim") and x_elem.ndim == 2:
+        return x_elem.shape[1]
+    if hasattr(x_elem, "attrs"):
+        shape = x_elem.attrs.get("shape", None)
+        if shape is not None and len(shape) >= 2:
+            return int(shape[1])
+    return 0
+
+
+def read_obs_lazy(path: str | Path) -> tuple[pd.DataFrame, tuple[int, int]]:
+    """Read only obs (in memory) and shape from an h5ad or zarr file.
+
+    X is never loaded. Returns (obs_dataframe, (n_obs, n_vars)).
+    """
+    path = Path(path)
+    spath = str(path)
+
+    if spath.endswith(".h5ad"):
+        import h5py
+
+        with h5py.File(spath, "r") as f:
+            obs = ad.io.read_elem(f["obs"])
+            n_vars = _x_n_vars(f["X"]) if "X" in f else 0
+        return obs, (obs.shape[0], n_vars)
+
+    import zarr
+
+    g = zarr.open_group(spath, mode="r")
+    obs = ad.io.read_elem(g["obs"])
+    n_vars = _x_n_vars(g["X"]) if "X" in g else 0
+    return obs, (obs.shape[0], n_vars)
+
+
 def profile_summary(profile: CategoryProfile) -> dict:
     """Compute summary statistics for a profile without generating data."""
     counts = make_category_counts(profile)

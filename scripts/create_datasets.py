@@ -13,7 +13,6 @@ Usage:
 """
 from __future__ import annotations
 
-import os
 import shutil
 import time
 from pathlib import Path
@@ -28,6 +27,7 @@ from annbatch_grouped.data_gen import (
     generate_adata,
     make_category_counts,
     profile_summary,
+    read_obs_lazy,
 )
 from annbatch_grouped.paths import DATA_DIR
 from annbatch_grouped.plotting import plot_category_distribution
@@ -130,30 +130,29 @@ def _print_real_data_plan(
     groupby_key: str,
     store_base: Path,
     chunk_size: int,
+    n_obs_per_dataset: int,
 ) -> None:
-    """Read just the metadata of a file and print what will happen."""
-    import anndata as ad
-
+    """Read just obs and shape from a file and print what will happen."""
     print(f"\n{'='*80}")
     print("Dataset conversion plan")
     print(f"{'='*80}")
-    print(f"  source:      {src_path}")
-    print(f"  store_dir:   {store_base}")
-    print(f"  store_name:  {name}.zarr")
-    print(f"  groupby_key: {groupby_key}")
-    print(f"  chunk_size:  {chunk_size}")
+    print(f"  source:           {src_path}")
+    print(f"  store_dir:        {store_base}")
+    print(f"  store_name:       {name}.zarr")
+    print(f"  groupby_key:      {groupby_key}")
+    print(f"  chunk_size:       {chunk_size}")
+    print(f"  n_obs_per_dataset:{n_obs_per_dataset:,}")
 
     file_size = src_path.stat().st_size if src_path.is_file() else 0
     if file_size:
-        print(f"  source size: {_fmt_bytes(file_size)}")
+        print(f"  source size:      {_fmt_bytes(file_size)}")
 
-    print(f"\n  Reading obs metadata from source ...")
-    adata = ad.read_h5ad(src_path, backed="r") if str(src_path).endswith(".h5ad") else ad.read(src_path)
-    n_obs, n_vars = adata.shape
+    print(f"\n  Reading obs from source (X is not loaded) ...")
+    obs, (n_obs, n_vars) = read_obs_lazy(src_path)
 
-    if groupby_key not in adata.obs.columns:
-        avail = ", ".join(adata.obs.columns[:20])
-        if len(adata.obs.columns) > 20:
+    if groupby_key not in obs.columns:
+        avail = ", ".join(obs.columns[:20])
+        if len(obs.columns) > 20:
             avail += ", ..."
         click.echo(
             f"\n  Error: groupby_key '{groupby_key}' not found in obs columns.\n"
@@ -162,7 +161,7 @@ def _print_real_data_plan(
         )
         raise SystemExit(1)
 
-    counts = adata.obs[groupby_key].value_counts()
+    counts = obs[groupby_key].value_counts()
     n_categories = len(counts)
 
     print(f"\n  Dataset summary:")
@@ -173,15 +172,17 @@ def _print_real_data_plan(
     print(f"    median_group:    {int(counts.median()):,}")
     print(f"    imbalance_ratio: {counts.max() / max(counts.min(), 1):.1f}x")
 
+    n_chunks = (n_obs + n_obs_per_dataset - 1) // n_obs_per_dataset
+    print(f"\n  Write plan:")
+    print(f"    Processing in {n_chunks} chunk(s) of up to {n_obs_per_dataset:,} obs")
+    print(f"    Data is loaded lazily -- only one chunk in memory at a time")
+
     top_n = min(10, n_categories)
     print(f"\n  Top {top_n} categories:")
     for cat, cnt in counts.head(top_n).items():
         print(f"    {cat}: {cnt:,}")
     if n_categories > top_n:
         print(f"    ... and {n_categories - top_n} more")
-
-    if hasattr(adata, "file") and hasattr(adata.file, "close"):
-        adata.file.close()
 
     print()
 
@@ -192,23 +193,17 @@ def _create_from_path(
     groupby_key: str,
     store_base: Path,
     chunk_size: int,
+    n_obs_per_dataset: int,
     plots_dir: Path | None,
 ) -> None:
-    """Read a real dataset and write it as a GroupedCollection store."""
-    import anndata as ad
-
-    from annbatch_grouped.runners import write_grouped_store
+    """Convert a file to a GroupedCollection store using lazy loading."""
+    from annbatch_grouped.runners import write_grouped_store_from_path
 
     store_path = store_base / f"{name}.zarr"
 
-    print(f"\n  Loading {src_path} ...")
-    t0 = time.perf_counter()
-    adata = ad.read(src_path)
-    load_time = time.perf_counter() - t0
-    print(f"  Loaded {adata.shape} in {load_time:.1f}s")
-
     if plots_dir is not None:
-        counts = adata.obs[groupby_key].value_counts().values
+        obs, _ = read_obs_lazy(src_path)
+        counts = obs[groupby_key].value_counts().values
         sorted_counts = np.sort(counts)[::-1]
         plot_path = plots_dir / f"dist_{name}.png"
         plot_category_distribution(
@@ -216,12 +211,17 @@ def _create_from_path(
             distribution_label=f"real ({groupby_key})",
         )
         print(f"  Saved distribution plot: {plot_path}")
+        del obs
 
     if store_path.exists():
         print(f"  Removing existing store: {store_path}")
         shutil.rmtree(store_path)
 
-    write_grouped_store(adata, store_path, groupby_key, n_obs_per_chunk=chunk_size)
+    write_grouped_store_from_path(
+        src_path, store_path, groupby_key,
+        n_obs_per_chunk=chunk_size,
+        n_obs_per_dataset=n_obs_per_dataset,
+    )
     print(f"  Store ready: {store_path}")
 
 
@@ -242,6 +242,9 @@ def _create_from_path(
               help="Directory for zarr stores (default: DATA_DIR from paths.conf)")
 @click.option("--chunk_size", type=int, default=256,
               help="n_obs_per_chunk for GroupedCollection write")
+@click.option("--n_obs_per_dataset", type=int, default=20_971_520,
+              help="Max observations per on-disk dataset chunk (controls peak "
+                   "memory during --from_path conversion). Default ~20M.")
 @click.option("--n_obs", type=int, default=None,
               help="Override n_obs for all selected synthetic profiles")
 @click.option("--n_vars", type=int, default=None,
@@ -257,6 +260,7 @@ def main(
     profiles: tuple[str, ...],
     store_dir: str | None,
     chunk_size: int,
+    n_obs_per_dataset: int,
     n_obs: int | None,
     n_vars: int | None,
     plots: bool,
@@ -276,7 +280,7 @@ def main(
 
         src = Path(from_path)
         ds_name = name or src.stem
-        _print_real_data_plan(src, ds_name, groupby_key, store_base, chunk_size)
+        _print_real_data_plan(src, ds_name, groupby_key, store_base, chunk_size, n_obs_per_dataset)
 
         if not yes:
             if not click.confirm("Proceed with dataset conversion?"):
@@ -284,7 +288,7 @@ def main(
                 raise SystemExit(0)
 
         t0 = time.perf_counter()
-        _create_from_path(src, ds_name, groupby_key, store_base, chunk_size, plots_dir)
+        _create_from_path(src, ds_name, groupby_key, store_base, chunk_size, n_obs_per_dataset, plots_dir)
         elapsed = time.perf_counter() - t0
 
         print(f"\n{'='*80}")

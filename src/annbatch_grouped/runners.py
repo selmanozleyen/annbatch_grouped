@@ -82,11 +82,11 @@ def write_grouped_store(
     groupby_key: str,
     n_obs_per_chunk: int = 640,
 ) -> GroupedCollection:
-    """Write an AnnData to a GroupedCollection on disk.
+    """Write an in-memory AnnData to a GroupedCollection on disk.
 
-    Writes via a temp zarr store (no h5ad). Uses the same zarr
-    sharding/compression settings as the annbatch paper benchmarks
-    (LZ4, 10GB shards, 640 obs/chunk).
+    Writes via a temp zarr store, then builds the GroupedCollection.
+    For large files that don't fit in memory, use
+    write_grouped_store_from_path instead.
     """
     from annbatch_grouped.paths import DATA_DIR
 
@@ -130,6 +130,43 @@ def write_grouped_store(
         )
 
     shutil.rmtree(tmp_zarr, ignore_errors=True)
+    return collection
+
+
+def write_grouped_store_from_path(
+    src_path: Path,
+    store_path: Path,
+    groupby_key: str,
+    n_obs_per_chunk: int = 640,
+    n_obs_per_dataset: int = N_OBS_PER_DATASET,
+) -> GroupedCollection:
+    """Build a GroupedCollection directly from a file path (h5ad, zarr, ...).
+
+    Uses annbatch's lazy loading so the full dataset is never
+    materialized in memory at once -- only n_obs_per_dataset rows are
+    loaded per chunk. Suitable for files much larger than available RAM.
+    """
+    print(f"  Creating GroupedCollection at {store_path} ...")
+    print(f"    source:           {src_path}")
+    print(f"    n_obs_per_chunk:  {n_obs_per_chunk}")
+    print(f"    n_obs_per_dataset:{n_obs_per_dataset}")
+    print(f"    zarr_shard_size:  {ZARR_SHARD_SIZE}")
+    print(f"    compressor:       lz4/clevel3/shuffle")
+    sys.stdout.write("  Writing grouped store (lazy, chunked) ...")
+    sys.stdout.flush()
+    with _ProgressTicker("grouped write", interval=30.0):
+        collection = GroupedCollection(str(store_path))
+        collection.add_adatas(
+            [str(src_path)],
+            groupby=groupby_key,
+            n_obs_per_chunk=n_obs_per_chunk,
+            zarr_shard_size=ZARR_SHARD_SIZE,
+            n_obs_per_dataset=n_obs_per_dataset,
+            zarr_compressor=(COMPRESSOR,),
+            shuffle=True,
+            random_seed=42,
+        )
+
     return collection
 
 

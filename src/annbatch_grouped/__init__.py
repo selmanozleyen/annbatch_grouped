@@ -5,6 +5,7 @@ from annbatch_grouped.data_gen import (
     estimate_dataset_size,
     generate_adata,
     make_category_counts,
+    read_obs_lazy,
 )
 
 __all__ = [
@@ -12,4 +13,5 @@ __all__ = [
     "estimate_dataset_size",
     "generate_adata",
     "make_category_counts",
+    "read_obs_lazy",
 ]
