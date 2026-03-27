@@ -257,6 +257,36 @@ def generate_adata(profile: CategoryProfile) -> ad.AnnData:
     return ad.AnnData(X=X, obs=obs, var=var)
 
 
+def estimate_dataset_size(profile: CategoryProfile) -> dict:
+    """Estimate in-memory and on-disk sizes for a profile (no data generated).
+
+    Returns a dict with byte counts and human-readable strings.
+    """
+    nnz = int(profile.n_obs * profile.n_vars * profile.density)
+    sparse_bytes = nnz * 4 + (nnz + profile.n_obs + 1) * 4
+    obs_bytes = profile.n_obs * 20
+    mem_bytes = sparse_bytes + obs_bytes
+
+    # LZ4 on random floats typically achieves ~60-70% of original;
+    # structured/repeated data compresses much better.
+    disk_bytes = int(mem_bytes * 0.65)
+
+    def _fmt(b: int) -> str:
+        if b >= 1 << 30:
+            return f"{b / (1 << 30):.1f} GB"
+        if b >= 1 << 20:
+            return f"{b / (1 << 20):.0f} MB"
+        return f"{b / (1 << 10):.0f} KB"
+
+    return {
+        "mem_bytes": mem_bytes,
+        "disk_bytes": disk_bytes,
+        "mem_human": _fmt(mem_bytes),
+        "disk_human": _fmt(disk_bytes),
+        "nnz": nnz,
+    }
+
+
 def profile_summary(profile: CategoryProfile) -> dict:
     """Compute summary statistics for a profile without generating data."""
     counts = make_category_counts(profile)
