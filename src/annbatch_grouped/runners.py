@@ -178,8 +178,7 @@ def write_grouped_store_from_path(
             zarr_shard_size=ZARR_SHARD_SIZE,
             n_obs_per_dataset=n_obs_per_dataset,
             zarr_compressor=(COMPRESSOR,),
-            shuffle=True,
-            random_seed=42,
+            shuffle=False,
             max_memory=max_memory,
         )
 
