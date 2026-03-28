@@ -19,6 +19,7 @@ _DEFAULTS = {
     "RESULTS_DIR": "./results",
     "ANNBATCH_REPO": "https://github.com/scverse/annbatch.git",
     "ANNBATCH_REF": "",
+    "TAHOE_PATH": "",
 }
 
 
@@ -44,7 +45,8 @@ def _parse_conf(path: Path) -> dict[str, str]:
         if "=" not in line:
             continue
         key, _, value = line.partition("=")
-        kv[key.strip()] = value.strip()
+        value = value.split("#")[0].strip()
+        kv[key.strip()] = value
     return kv
 
 
@@ -63,3 +65,4 @@ DATA_DIR: Path = Path(_cfg["DATA_DIR"])
 RESULTS_DIR: Path = Path(_cfg["RESULTS_DIR"])
 ANNBATCH_REPO: str = _cfg["ANNBATCH_REPO"]
 ANNBATCH_REF: str = _cfg["ANNBATCH_REF"]
+TAHOE_PATH: str = _cfg["TAHOE_PATH"]
