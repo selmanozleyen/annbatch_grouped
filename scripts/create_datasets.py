@@ -167,9 +167,6 @@ def _print_real_data_plan(
     if file_size:
         print(f"  source size:      {_fmt_bytes(file_size)}")
 
-    if store_path.exists():
-        print(f"\n  WARNING: {store_path} already exists and will be REPLACED")
-
     print("\n  Reading obs from source (X is not loaded) ...")
     obs, (n_obs, n_vars) = read_obs_lazy(src_path)
 
@@ -208,6 +205,9 @@ def _print_real_data_plan(
         print(f"    {cat}: {cnt:,}")
     if n_categories > top_n:
         print(f"    ... and {n_categories - top_n} more")
+
+    if store_path.exists():
+        print(f"\n  WARNING: {store_path} already exists and will be REPLACED")
 
     print()
 
