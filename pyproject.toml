@@ -17,7 +17,7 @@ classifiers = [
   "Programming Language :: Python :: 3.14",
 ]
 dependencies = [
-  "annbatch",
+  "annbatch @ git+https://github.com/selmanozleyen/annbatch.git@feat/groupby-collection-v3",
   "anndata",
   "click",
   "numpy",
@@ -25,7 +25,7 @@ dependencies = [
   "scipy",
   "tqdm",
   "zarr",
-  "zarrs",
+  "zarrs>=0.2.2",
 ]
 optional-dependencies.viz = [
   "ipykernel",
