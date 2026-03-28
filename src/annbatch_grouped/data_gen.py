@@ -85,10 +85,11 @@ class CategoryProfile:
 TAHOE_LIKE = CategoryProfile(
     name="tahoe_like",
     n_obs=10_000_000,
-    n_vars=2_000,
+    n_vars=62_714,
     n_categories=50,
     distribution="zipf",
     zipf_exponent=0.5,
+    density=0.023,
 )
 
 FEW_CATEGORIES = CategoryProfile(
