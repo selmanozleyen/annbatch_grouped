@@ -1,10 +1,12 @@
 """Headless plot generation -- saves PNGs to disk, no display needed."""
+
 from __future__ import annotations
 
 import json
 from pathlib import Path
 
 import matplotlib
+
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
@@ -69,7 +71,8 @@ def plot_all_distributions(
     paths = []
     for name, dist_type, counts in profiles_and_counts:
         p = plot_category_distribution(
-            counts, name,
+            counts,
+            name,
             output_dir / f"dist_{name}.png",
             distribution_label=dist_type,
         )
@@ -98,8 +101,8 @@ def plot_benchmark_comparison(
         print("  No results to plot.")
         return saved
 
-    profiles = sorted(set(r["profile_name"] for r in records))
-    loaders = sorted(set(r["loader_name"] for r in records))
+    profiles = sorted({r["profile_name"] for r in records})
+    loaders = sorted({r["loader_name"] for r in records})
 
     # -- Throughput comparison bar chart --
     fig, ax = plt.subplots(figsize=(max(8, len(profiles) * 1.5), 5))
@@ -141,7 +144,7 @@ def plot_benchmark_comparison(
                 labels_bp.append(loader)
         if data_for_bp:
             bp = ax.boxplot(data_for_bp, labels=labels_bp, patch_artist=True)
-            for patch, c in zip(bp["boxes"], colors):
+            for patch, c in zip(bp["boxes"], colors, strict=False):
                 patch.set_facecolor(c)
                 patch.set_alpha(0.6)
             ax.set_ylabel("Batch latency (ms)")

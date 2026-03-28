@@ -7,6 +7,7 @@ Usage:
     python scripts/run_demo.py --store tahoe_like
     python scripts/run_demo.py --store tahoe --groupby_key cell_line --n_batches 200
 """
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -19,26 +20,33 @@ from annbatch_grouped.paths import DATA_DIR, RESULTS_DIR
 from annbatch_grouped.plotting import plot_benchmark_comparison
 from annbatch_grouped.runners import benchmark_categorical_loader
 
-
 PROFILE_MAP = {p.name: p for p in ALL_PROFILES}
 
 
 @click.command()
-@click.option("--output_dir", type=str, default=None,
-              help="Results directory (default: RESULTS_DIR/demo from paths.conf)")
-@click.option("--store", type=str, default="tahoe_like",
-              help="Name of the store (without .zarr) to benchmark. "
-                   "Can be a predefined profile or any store created with create_datasets.py.")
-@click.option("--groupby_key", type=str, default=None,
-              help="obs column used for grouping. Auto-detected from profile for "
-                   "predefined stores; required for custom stores.")
+@click.option(
+    "--output_dir", type=str, default=None, help="Results directory (default: RESULTS_DIR/demo from paths.conf)"
+)
+@click.option(
+    "--store",
+    type=str,
+    default="tahoe_like",
+    help="Name of the store (without .zarr) to benchmark. "
+    "Can be a predefined profile or any store created with create_datasets.py.",
+)
+@click.option(
+    "--groupby_key",
+    type=str,
+    default=None,
+    help="obs column used for grouping. Auto-detected from profile for predefined stores; required for custom stores.",
+)
 @click.option("--batch_size", type=int, default=4096)
-@click.option("--chunk_size", type=int, default=256,
-              help="Loader chunk_size for CategoricalSampler (read-side)")
+@click.option("--chunk_size", type=int, default=256, help="Loader chunk_size for CategoricalSampler (read-side)")
 @click.option("--preload_nchunks", type=int, default=16)
 @click.option("--n_batches", type=int, default=500)
-@click.option("--store_dir", type=str, default=None,
-              help="Directory containing zarr stores (default: DATA_DIR from paths.conf)")
+@click.option(
+    "--store_dir", type=str, default=None, help="Directory containing zarr stores (default: DATA_DIR from paths.conf)"
+)
 def main(
     output_dir: str | None,
     store: str,
@@ -86,7 +94,7 @@ def main(
     print(f"  n_batches:        {n_batches}")
     print(f"  output_dir:       {results_base}")
 
-    print(f"\n--- Benchmarking CategoricalSampler ---")
+    print("\n--- Benchmarking CategoricalSampler ---")
     result = benchmark_categorical_loader(
         store_path=store_path,
         groupby_key=groupby_key,
@@ -104,7 +112,7 @@ def main(
     results_path = save_results(results, results_base)
     print(f"Results saved to {results_base}")
 
-    print(f"\n--- Generating benchmark plots ---")
+    print("\n--- Generating benchmark plots ---")
     plot_benchmark_comparison(results_path, results_base / "plots")
     print(f"All plots saved under {results_base}")
 

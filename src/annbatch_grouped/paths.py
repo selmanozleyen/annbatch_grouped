@@ -7,6 +7,7 @@ Resolution order for each key:
 
 The conf file is intentionally gitignored so every user sets their own paths.
 """
+
 from __future__ import annotations
 
 import os

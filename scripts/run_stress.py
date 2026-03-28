@@ -7,6 +7,7 @@ Usage:
     python scripts/run_stress.py --stores tahoe_like zipf_realistic
     python scripts/run_stress.py --stores tahoe --groupby_key cell_line
 """
+
 from __future__ import annotations
 
 import traceback
@@ -23,7 +24,6 @@ from annbatch_grouped.data_gen import ALL_PROFILES
 from annbatch_grouped.paths import DATA_DIR, RESULTS_DIR
 from annbatch_grouped.plotting import plot_benchmark_comparison
 from annbatch_grouped.runners import benchmark_categorical_loader
-
 
 PROFILE_MAP = {p.name: p for p in ALL_PROFILES}
 
@@ -45,10 +45,12 @@ def _run_single(
         print(f"\n  SKIPPING {store_name}: store not found at {store_path}")
         return results
 
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print(f"Store: {store_name}")
-    print(f"  groupby_key={groupby_key}, batch_size={batch_size}, "
-          f"chunk_size={chunk_size}, preload_nchunks={preload_nchunks}")
+    print(
+        f"  groupby_key={groupby_key}, batch_size={batch_size}, "
+        f"chunk_size={chunk_size}, preload_nchunks={preload_nchunks}"
+    )
 
     try:
         r = benchmark_categorical_loader(
@@ -62,36 +64,50 @@ def _run_single(
         )
         results.append(r)
         print(f"  {r.summary_line()}")
-    except Exception as e:
-        print(f"  FAILED CategoricalSampler benchmark:")
+    except Exception as e:  # noqa: BLE001
+        print("  FAILED CategoricalSampler benchmark:")
         traceback.print_exc()
-        results.append(BenchmarkResult(
-            loader_name="annbatch_categorical",
-            profile_name=store_name,
-            n_batches=0, batch_size=batch_size,
-            total_time_s=0, samples_per_sec=0,
-            extra={"error": str(e)},
-        ))
+        results.append(
+            BenchmarkResult(
+                loader_name="annbatch_categorical",
+                profile_name=store_name,
+                n_batches=0,
+                batch_size=batch_size,
+                total_time_s=0,
+                samples_per_sec=0,
+                extra={"error": str(e)},
+            )
+        )
 
     return results
 
 
 @click.command()
-@click.option("--output_dir", type=str, default=None,
-              help="Results directory (default: RESULTS_DIR/stress from paths.conf)")
-@click.option("--stores", type=str, multiple=True, default=None,
-              help="Store names to benchmark (default: all predefined profiles). "
-                   "Can include custom stores created with --from_path.")
-@click.option("--groupby_key", type=str, default=None,
-              help="obs column used for grouping. Auto-detected for predefined "
-                   "profiles; required when --stores includes custom names.")
+@click.option(
+    "--output_dir", type=str, default=None, help="Results directory (default: RESULTS_DIR/stress from paths.conf)"
+)
+@click.option(
+    "--stores",
+    type=str,
+    multiple=True,
+    default=None,
+    help="Store names to benchmark (default: all predefined profiles). "
+    "Can include custom stores created with --from_path.",
+)
+@click.option(
+    "--groupby_key",
+    type=str,
+    default=None,
+    help="obs column used for grouping. Auto-detected for predefined "
+    "profiles; required when --stores includes custom names.",
+)
 @click.option("--batch_size", type=int, default=4096)
-@click.option("--chunk_size", type=int, default=256,
-              help="Loader chunk_size for CategoricalSampler (read-side)")
+@click.option("--chunk_size", type=int, default=256, help="Loader chunk_size for CategoricalSampler (read-side)")
 @click.option("--preload_nchunks", type=int, default=16)
 @click.option("--n_batches", type=int, default=200)
-@click.option("--store_dir", type=str, default=None,
-              help="Directory containing zarr stores (default: DATA_DIR from paths.conf)")
+@click.option(
+    "--store_dir", type=str, default=None, help="Directory containing zarr stores (default: DATA_DIR from paths.conf)"
+)
 def main(
     output_dir: str | None,
     stores: tuple[str, ...],
@@ -142,7 +158,7 @@ def main(
                 store_base=store_base,
             )
             all_results.extend(results)
-        except Exception:
+        except Exception:  # noqa: BLE001
             print(f"\n  FATAL error on store {store_name}:")
             traceback.print_exc()
 
@@ -151,12 +167,12 @@ def main(
         results_path = save_results(all_results, results_base)
         print(f"Results saved to {results_path}")
 
-        print(f"\n--- Generating benchmark plots ---")
+        print("\n--- Generating benchmark plots ---")
         plot_benchmark_comparison(results_path, results_base / "plots")
         print(f"All plots saved under {results_base / 'plots'}")
     else:
         print("\nNo results collected. Make sure stores exist.")
-        print(f"Run 'python scripts/create_datasets.py' to create them.")
+        print("Run 'python scripts/create_datasets.py' to create them.")
 
 
 if __name__ == "__main__":

@@ -1,7 +1,8 @@
 """Synthetic AnnData generation with configurable category distributions."""
+
 from __future__ import annotations
 
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
@@ -147,6 +148,7 @@ ALL_PROFILES: list[CategoryProfile] = [
 # Distribution factory
 # ---------------------------------------------------------------------------
 
+
 def make_category_counts(profile: CategoryProfile) -> np.ndarray:
     """Compute per-category observation counts from a profile.
 
@@ -158,10 +160,7 @@ def make_category_counts(profile: CategoryProfile) -> np.ndarray:
     if k <= 0:
         raise ValueError(f"n_categories must be >= 1, got {k}")
     if n < k:
-        raise ValueError(
-            f"n_obs ({n}) must be >= n_categories ({k}) so every category "
-            "gets at least one observation"
-        )
+        raise ValueError(f"n_obs ({n}) must be >= n_categories ({k}) so every category gets at least one observation")
 
     if profile.distribution == "uniform":
         weights = np.ones(k)
@@ -188,9 +187,7 @@ def make_category_counts(profile: CategoryProfile) -> np.ndarray:
             raise ValueError("custom_weights required when distribution='custom'")
         weights = np.asarray(profile.custom_weights, dtype=np.float64)
         if len(weights) != k:
-            raise ValueError(
-                f"custom_weights length ({len(weights)}) != n_categories ({k})"
-            )
+            raise ValueError(f"custom_weights length ({len(weights)}) != n_categories ({k})")
 
     else:
         raise ValueError(f"Unknown distribution: {profile.distribution!r}")
@@ -208,7 +205,7 @@ def make_category_counts(profile: CategoryProfile) -> np.ndarray:
     counts = np.floor(raw).astype(np.int64)
     remainder = n - counts.sum()
     fractional_parts = raw - counts
-    top_indices = np.argsort(-fractional_parts)[:int(remainder)]
+    top_indices = np.argsort(-fractional_parts)[: int(remainder)]
     counts[top_indices] += 1
 
     assert counts.sum() == n, f"Bug: counts sum to {counts.sum()}, expected {n}"
@@ -240,9 +237,7 @@ def generate_adata(profile: CategoryProfile) -> ad.AnnData:
     )
 
     # Build obs with category labels
-    labels = np.concatenate([
-        np.full(c, f"cat_{i}", dtype=object) for i, c in enumerate(counts)
-    ])
+    labels = np.concatenate([np.full(c, f"cat_{i}", dtype=object) for i, c in enumerate(counts)])
     # Shuffle so categories are interleaved (GroupedCollection will re-sort)
     labels = rng.permutation(labels)
 

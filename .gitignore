@@ -1,5 +1,27 @@
+# Project-specific
 paths.conf
 results/
-__pycache__/
-*.egg-info/
+data/
+
+# Editor
+.vscode/
+
+# Temp files
+.DS_Store
+*~
+
+# Compiled files
 .venv/
+__pycache__/
+.*cache/
+
+# Distribution / packaging
+/dist/
+*.egg-info/
+
+# Tests and coverage
+/.coverage*
+
+# Docs
+/docs/generated/
+/docs/_build/

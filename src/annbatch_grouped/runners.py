@@ -1,4 +1,5 @@
 """Reusable benchmark runners for grouped/categorical loading."""
+
 from __future__ import annotations
 
 import shutil
@@ -24,17 +25,20 @@ warnings.filterwarnings(
 
 try:
     import zarrs  # noqa: F401
-    zarr.config.set({
-        "codec_pipeline.path": "zarrs.ZarrsCodecPipeline",
-        "threading.max_workers": None,
-    })
+
+    zarr.config.set(
+        {
+            "codec_pipeline.path": "zarrs.ZarrsCodecPipeline",
+            "threading.max_workers": None,
+        }
+    )
 except ImportError:
     pass
 
-from annbatch import CategoricalSampler, GroupedCollection, Loader, write_sharded
+from annbatch import CategoricalSampler, GroupedCollection, Loader, write_sharded  # noqa: E402
 
-from annbatch_grouped.baselines import NaiveCategoryLoader
-from annbatch_grouped.bench_utils import BenchmarkResult, benchmark_iterator
+from annbatch_grouped.baselines import NaiveCategoryLoader  # noqa: E402
+from annbatch_grouped.bench_utils import BenchmarkResult, benchmark_iterator  # noqa: E402
 
 if TYPE_CHECKING:
     from annbatch_grouped.data_gen import CategoryProfile
@@ -103,7 +107,8 @@ def write_grouped_store(
     with _ProgressTicker("zarr temp write"):
         tmp_group = zarr.open_group(tmp_zarr, mode="w")
         write_sharded(
-            tmp_group, adata,
+            tmp_group,
+            adata,
             n_obs_per_chunk=n_obs_per_chunk,
             shard_size=ZARR_SHARD_SIZE,
             compressors=(COMPRESSOR,),
@@ -113,7 +118,7 @@ def write_grouped_store(
     print(f"    n_obs_per_chunk:  {n_obs_per_chunk}")
     print(f"    zarr_shard_size:  {ZARR_SHARD_SIZE}")
     print(f"    n_obs_per_dataset:{N_OBS_PER_DATASET}")
-    print(f"    compressor:       lz4/clevel3/shuffle")
+    print("    compressor:       lz4/clevel3/shuffle")
     sys.stdout.write("  Writing grouped store ...")
     sys.stdout.flush()
     with _ProgressTicker("grouped write"):
@@ -139,19 +144,26 @@ def write_grouped_store_from_path(
     groupby_key: str,
     n_obs_per_chunk: int = 640,
     n_obs_per_dataset: int = N_OBS_PER_DATASET,
+    dataset_groupby: str | None = None,
 ) -> GroupedCollection:
     """Build a GroupedCollection directly from a file path (h5ad, zarr, ...).
 
     Uses annbatch's lazy loading so the full dataset is never
     materialized in memory at once -- only n_obs_per_dataset rows are
-    loaded per chunk. Suitable for files much larger than available RAM.
+    loaded per chunk.  Suitable for files much larger than available RAM.
+
+    When ``dataset_groupby`` is set, each unique value of that obs column
+    becomes its own on-disk dataset (``n_obs_per_dataset`` is ignored).
     """
     print(f"  Creating GroupedCollection at {store_path} ...")
     print(f"    source:           {src_path}")
     print(f"    n_obs_per_chunk:  {n_obs_per_chunk}")
-    print(f"    n_obs_per_dataset:{n_obs_per_dataset}")
+    if dataset_groupby is not None:
+        print(f"    dataset_groupby:  {dataset_groupby}")
+    else:
+        print(f"    n_obs_per_dataset:{n_obs_per_dataset}")
     print(f"    zarr_shard_size:  {ZARR_SHARD_SIZE}")
-    print(f"    compressor:       lz4/clevel3/shuffle")
+    print("    compressor:       lz4/clevel3/shuffle")
     sys.stdout.write("  Writing grouped store (lazy, chunked) ...")
     sys.stdout.flush()
     with _ProgressTicker("grouped write", interval=30.0):
@@ -159,6 +171,7 @@ def write_grouped_store_from_path(
         collection.add_adatas(
             [str(src_path)],
             groupby=groupby_key,
+            dataset_groupby=dataset_groupby,
             n_obs_per_chunk=n_obs_per_chunk,
             zarr_shard_size=ZARR_SHARD_SIZE,
             n_obs_per_dataset=n_obs_per_dataset,

@@ -3,6 +3,7 @@
 These provide alternative ways to load the same data so we can measure
 how annbatch's GroupedCollection + CategoricalSampler compares.
 """
+
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
@@ -68,10 +69,7 @@ class NaiveCategoryLoader:
         self._rng = np.random.default_rng(seed)
 
         categories = adata.obs[groupby_key].cat.categories
-        self._category_indices = {
-            cat: np.where(adata.obs[groupby_key] == cat)[0]
-            for cat in categories
-        }
+        self._category_indices = {cat: np.where(adata.obs[groupby_key] == cat)[0] for cat in categories}
         self._categories = list(categories)
         self._X = adata.X
 

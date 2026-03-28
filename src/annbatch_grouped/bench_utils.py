@@ -1,4 +1,5 @@
 """Timing and metrics utilities for benchmarks."""
+
 from __future__ import annotations
 
 import json
@@ -119,13 +120,13 @@ def save_results(results: Iterable[BenchmarkResult], output_dir: str | Path) -> 
 
 def print_results_table(results: list[BenchmarkResult]) -> None:
     """Print a simple comparison table to stdout."""
-    print(f"\n{'='*80}")
+    print(f"\n{'=' * 80}")
     print(f"{'Loader':<30} {'Profile':<20} {'samples/sec':>15} {'total_s':>10} {'med_ms':>10}")
-    print(f"{'-'*80}")
+    print(f"{'-' * 80}")
     for r in results:
         print(
             f"{r.loader_name:<30} {r.profile_name:<20} "
             f"{r.samples_per_sec:>15,.0f} {r.total_time_s:>10.2f} "
             f"{r.median_batch_time_s * 1e3:>10.2f}"
         )
-    print(f"{'='*80}\n")
+    print(f"{'=' * 80}\n")
