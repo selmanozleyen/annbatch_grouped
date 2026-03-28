@@ -146,6 +146,7 @@ def _print_real_data_plan(
     chunk_size: int,
     n_obs_per_dataset: int,
     dataset_groupby: str | None,
+    max_memory: str,
 ) -> None:
     """Read just obs and shape from a file and print what will happen."""
     print(f"\n{'=' * 80}")
@@ -158,6 +159,7 @@ def _print_real_data_plan(
     print(f"  store_name:       {name}.zarr")
     print(f"  groupby_key:      {groupby_key}")
     print(f"  chunk_size:       {chunk_size}")
+    print(f"  max_memory:       {max_memory}")
     if dataset_groupby is not None:
         print(f"  dataset_groupby:  {dataset_groupby}  (one dataset per group)")
     else:
@@ -221,6 +223,7 @@ def _create_from_path(
     n_obs_per_dataset: int,
     dataset_groupby: str | None,
     plots_dir: Path | None,
+    max_memory: str,
 ) -> None:
     """Convert a file to a GroupedCollection store using lazy loading."""
     from annbatch_grouped.runners import write_grouped_store_from_path
@@ -252,6 +255,7 @@ def _create_from_path(
         n_obs_per_chunk=chunk_size,
         n_obs_per_dataset=n_obs_per_dataset,
         dataset_groupby=dataset_groupby,
+        max_memory=max_memory,
     )
     print(f"  Store ready: {store_path}")
 
@@ -300,6 +304,12 @@ def _create_from_path(
     "memory during --from_path conversion). Default ~20M. "
     "Ignored when --dataset_groupby is set.",
 )
+@click.option(
+    "--max_memory",
+    type=str,
+    default="8GB",
+    help="Peak memory budget for X data during sequential scan (e.g. '8GB', '512MB'). Default 8GB.",
+)
 @click.option("--n_obs", type=int, default=None, help="Override n_obs for all selected synthetic profiles")
 @click.option("--n_vars", type=int, default=None, help="Override n_vars for all selected synthetic profiles")
 @click.option("--plots/--no-plots", default=True, help="Save distribution plots alongside stores")
@@ -313,6 +323,7 @@ def main(
     chunk_size: int,
     dataset_groupby: str | None,
     n_obs_per_dataset: int,
+    max_memory: str,
     n_obs: int | None,
     n_vars: int | None,
     plots: bool,
@@ -332,7 +343,9 @@ def main(
 
         src = Path(from_path)
         ds_name = name or src.stem
-        _print_real_data_plan(src, ds_name, groupby_key, store_base, chunk_size, n_obs_per_dataset, dataset_groupby)
+        _print_real_data_plan(
+            src, ds_name, groupby_key, store_base, chunk_size, n_obs_per_dataset, dataset_groupby, max_memory
+        )
 
         if not yes:
             if not click.confirm("Proceed with dataset conversion?"):
@@ -341,7 +354,7 @@ def main(
 
         t0 = time.perf_counter()
         _create_from_path(
-            src, ds_name, groupby_key, store_base, chunk_size, n_obs_per_dataset, dataset_groupby, plots_dir
+            src, ds_name, groupby_key, store_base, chunk_size, n_obs_per_dataset, dataset_groupby, plots_dir, max_memory
         )
         elapsed = time.perf_counter() - t0
 

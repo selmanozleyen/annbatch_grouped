@@ -145,6 +145,7 @@ def write_grouped_store_from_path(
     n_obs_per_chunk: int = 640,
     n_obs_per_dataset: int = N_OBS_PER_DATASET,
     dataset_groupby: str | None = None,
+    max_memory: str = "8GB",
 ) -> GroupedCollection:
     """Build a GroupedCollection directly from a file path (h5ad, zarr, ...).
 
@@ -158,6 +159,7 @@ def write_grouped_store_from_path(
     print(f"  Creating GroupedCollection at {store_path} ...")
     print(f"    source:           {src_path}")
     print(f"    n_obs_per_chunk:  {n_obs_per_chunk}")
+    print(f"    max_memory:       {max_memory}")
     if dataset_groupby is not None:
         print(f"    dataset_groupby:  {dataset_groupby}")
     else:
@@ -178,6 +180,7 @@ def write_grouped_store_from_path(
             zarr_compressor=(COMPRESSOR,),
             shuffle=True,
             random_seed=42,
+            max_memory=max_memory,
         )
 
     return collection
