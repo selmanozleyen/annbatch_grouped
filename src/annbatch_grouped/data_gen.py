@@ -227,15 +227,24 @@ def generate_adata(profile: CategoryProfile) -> ad.AnnData:
     rng = np.random.default_rng(profile.seed)
     counts = make_category_counts(profile)
 
-    # Build sparse X
-    X = sp.random(
-        profile.n_obs,
-        profile.n_vars,
-        density=profile.density,
-        format="csr",
-        dtype=np.float32,
-        random_state=rng.integers(0, 2**31),
-    )
+    # Build sparse X in row-chunks to avoid allocating a flat index
+    # array of size n_obs * n_vars * density (can be TiBs for large matrices).
+    CHUNK = 200_000
+    chunks = []
+    for row_start in range(0, profile.n_obs, CHUNK):
+        row_end = min(row_start + CHUNK, profile.n_obs)
+        n_rows = row_end - row_start
+        chunk = sp.random(
+            n_rows,
+            profile.n_vars,
+            density=profile.density,
+            format="csr",
+            dtype=np.float32,
+            random_state=rng.integers(0, 2**31),
+        )
+        chunks.append(chunk)
+    X = sp.vstack(chunks, format="csr")
+    del chunks
 
     # Build obs with category labels
     labels = np.concatenate([np.full(c, f"cat_{i}", dtype=object) for i, c in enumerate(counts)])

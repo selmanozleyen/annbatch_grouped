@@ -100,33 +100,37 @@ def _convert_csr_chunked(
 
     t0 = time.perf_counter()
     written = 0
-    for start in range(0, n_obs, chunk_rows):
+    n_iters = (n_obs + chunk_rows - 1) // chunk_rows
+    for i, start in enumerate(range(0, n_obs, chunk_rows)):
         end = min(start + chunk_rows, n_obs)
         ptr_start = int(indptr_full[start])
         ptr_end = int(indptr_full[end])
         chunk_nnz = ptr_end - ptr_start
 
         if chunk_nnz > 0:
-            z_data[ptr_start:ptr_end] = data_ds[ptr_start:ptr_end]
+            data_chunk = data_ds[ptr_start:ptr_end]
+            z_data[ptr_start:ptr_end] = data_chunk
+            del data_chunk
+
             idx_chunk = indices_ds[ptr_start:ptr_end]
             if indices_dtype != indices_ds.dtype:
                 idx_chunk = idx_chunk.astype(indices_dtype)
             z_indices[ptr_start:ptr_end] = idx_chunk
+            del idx_chunk
 
         written += chunk_nnz
         elapsed = time.perf_counter() - t0
         pct = written / nnz * 100
         speed = written * data_ds.dtype.itemsize / elapsed if elapsed > 0 else 0
-        sys.stdout.write(
-            f"\r    rows {start:,}-{end:,} / {n_obs:,}  "
+        print(
+            f"    [{i+1}/{n_iters}] rows {start:,}-{end:,} / {n_obs:,}  "
             f"nnz {written:,}/{nnz:,} ({pct:.1f}%)  "
             f"elapsed {_fmt_time(elapsed)}  "
             f"~{_fmt_bytes(speed)}/s"
         )
-        sys.stdout.flush()
 
     elapsed = time.perf_counter() - t0
-    print(f"\n    Done writing X in {_fmt_time(elapsed)}")
+    print(f"    Done writing X in {_fmt_time(elapsed)}")
 
 
 @click.command()
@@ -188,12 +192,22 @@ def main(src: str | None, dst: str | None, chunk_rows: int, yes: bool):
 
     if dst_path.exists():
         import shutil
-        shutil.rmtree(dst_path)
+        for attempt in range(5):
+            try:
+                shutil.rmtree(dst_path)
+                break
+            except OSError:
+                if attempt == 4:
+                    raise
+                print(f"  rmtree failed (attempt {attempt+1}/5), retrying in 5s...")
+                time.sleep(5)
 
     print(f"\n  Opening source and creating zarr store...")
     t_total = time.perf_counter()
 
     z_root = zarr.open_group(str(dst_path), mode="w")
+    z_root.attrs["encoding-type"] = "anndata"
+    z_root.attrs["encoding-version"] = "0.1.0"
 
     with h5py.File(str(src_path), "r") as f:
         print(f"\n  Converting X ({encoding})...")

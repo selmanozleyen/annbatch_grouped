@@ -25,3 +25,6 @@ __pycache__/
 # Docs
 /docs/generated/
 /docs/_build/
+
+
+*.log

@@ -19,6 +19,7 @@ classifiers = [
 dependencies = [
   "annbatch @ git+https://github.com/selmanozleyen/annbatch.git@feat/groupby-collection-v3",
   "anndata",
+  "anndata_rs @ git+https://github.com/selmanozleyen/anndata-rs.git@feat/ooc-permutation-engine#subdirectory=python",
   "click",
   "numpy",
   "pandas",
