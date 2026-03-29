@@ -19,7 +19,8 @@ _DEFAULTS = {
     "RESULTS_DIR": "./results",
     "ANNBATCH_REPO": "https://github.com/scverse/annbatch.git",
     "ANNBATCH_REF": "",
-    "TAHOE_PATH": "",
+    "TAHOE_H5AD": "",
+    "TAHOE_ZARR": "",
 }
 
 
@@ -65,4 +66,5 @@ DATA_DIR: Path = Path(_cfg["DATA_DIR"])
 RESULTS_DIR: Path = Path(_cfg["RESULTS_DIR"])
 ANNBATCH_REPO: str = _cfg["ANNBATCH_REPO"]
 ANNBATCH_REF: str = _cfg["ANNBATCH_REF"]
-TAHOE_PATH: str = _cfg["TAHOE_PATH"]
+TAHOE_H5AD: str = _cfg["TAHOE_H5AD"]
+TAHOE_ZARR: str = _cfg["TAHOE_ZARR"]

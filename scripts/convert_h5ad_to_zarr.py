@@ -23,7 +23,7 @@ import numpy as np
 import zarr
 from zarr.codecs import BloscCodec, BloscShuffle
 
-from annbatch_grouped.paths import DATA_DIR, TAHOE_PATH
+from annbatch_grouped.paths import DATA_DIR, TAHOE_H5AD
 
 COMPRESSOR = BloscCodec(cname="lz4", clevel=3, shuffle=BloscShuffle.shuffle)
 
@@ -135,7 +135,7 @@ def _convert_csr_chunked(
 
 @click.command()
 @click.option("--src", type=click.Path(exists=True), default=None,
-              help="Source h5ad file (default: TAHOE_PATH from paths.conf)")
+              help="Source h5ad file (default: TAHOE_H5AD from paths.conf)")
 @click.option("--dst", type=str, default=None,
               help="Destination zarr store (default: DATA_DIR/<stem>.zarr)")
 @click.option("--chunk_rows", type=int, default=100_000,
@@ -144,10 +144,10 @@ def _convert_csr_chunked(
               help="Skip confirmation prompt")
 def main(src: str | None, dst: str | None, chunk_rows: int, yes: bool):
     if src is None:
-        if not TAHOE_PATH:
-            click.echo("Error: no --src and TAHOE_PATH not set in paths.conf", err=True)
+        if not TAHOE_H5AD:
+            click.echo("Error: no --src and TAHOE_H5AD not set in paths.conf", err=True)
             raise SystemExit(1)
-        src = TAHOE_PATH
+        src = TAHOE_H5AD
     src_path = Path(src)
 
     if dst is None:
