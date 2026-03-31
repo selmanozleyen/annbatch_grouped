@@ -37,18 +37,18 @@ ANNBATCH_REF=feat/groupby-collection-v3
 ## Running
 
 ```bash
-# Single-profile demo
-python scripts/run_demo.py
+# Run categorical benchmark only
+python scripts/bench.py --mode categorical
 
-# Stress test (all profiles)
-python scripts/run_stress.py
+# Compare all three loader modes
+python scripts/bench.py --mode per_category --mode random --mode categorical
 
-# Sweep a parameter
-python scripts/run_stress.py --sweep n_categories
+# Submit a batch job
+sbatch scripts/bench.sbatch categorical
 ```
 
 ## Structure
 
 - `src/annbatch_grouped/` -- library code (data generation, profiles, timing, plotting)
-- `scripts/` -- runnable scripts (demo, stress tests, install helper)
+- `scripts/` -- runnable scripts (benchmarks, dataset generation, install helper)
 - `paths.conf` -- local path configuration (gitignored)

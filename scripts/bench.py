@@ -116,6 +116,33 @@ def _header(title: str):
     print(f"{'=' * 70}")
 
 
+def _run_benchmark(
+    title: str,
+    build_loader,
+    *,
+    loader_name: str,
+    batch_size: int,
+    n_batches: int,
+    warmup: int,
+) -> BenchmarkResult:
+    _header(title)
+    t0 = time.perf_counter()
+    loader, extra, summary = build_loader()
+    print(f"  init {time.perf_counter() - t0:.2f}s | {summary} | RSS {_rss()}")
+
+    result = benchmark_iterator(
+        iter(loader),
+        n_batches=n_batches,
+        batch_size=batch_size,
+        loader_name=loader_name,
+        profile_name="tahoe",
+        warmup_batches=warmup,
+        extra=extra,
+    )
+    print(f"  {result.summary_line()} | RSS {_rss()}")
+    return result
+
+
 def _load_stores_into_loader(loader: Loader, store_dir: str) -> int:
     """Open every .zarr in *store_dir* and add to *loader*. Returns total n_obs."""
     total = 0
@@ -133,95 +160,93 @@ def _load_stores_into_loader(loader: Loader, store_dir: str) -> int:
 
 def bench_per_category(
     store_dir: str, batch_size: int, n_batches: int, warmup: int, seed: int,
-    progress_every: int,
 ) -> BenchmarkResult:
-    _header("PerCategoryZarrLoader (random category, random rows)")
-    t0 = time.perf_counter()
-    loader = PerCategoryZarrLoader(
-        store_dir=store_dir,
-        batch_size=batch_size,
-        n_batches=warmup + n_batches,
-        seed=seed,
-    )
-    n_cat = len(loader.categories)
-    n_obs = sum(loader.n_obs_per_category.values())
-    print(f"  init {time.perf_counter() - t0:.2f}s | {n_cat} cats, {n_obs:,} obs | RSS {_rss()}")
+    def build_loader():
+        loader = PerCategoryZarrLoader(
+            store_dir=store_dir,
+            batch_size=batch_size,
+            n_batches=warmup + n_batches,
+            seed=seed,
+        )
+        n_cat = len(loader.categories)
+        n_obs = sum(loader.n_obs_per_category.values())
+        extra = {"n_categories": n_cat}
+        summary = f"{n_cat} cats, {n_obs:,} obs"
+        return loader, extra, summary
 
-    result = benchmark_iterator(
-        iter(loader), n_batches=n_batches, batch_size=batch_size,
-        loader_name="per_category_zarr", profile_name="tahoe",
-        warmup_batches=warmup,
-        extra={"n_categories": n_cat},
-        progress_every=progress_every,
+    return _run_benchmark(
+        "PerCategoryZarrLoader (random category, random rows)",
+        build_loader,
+        loader_name="per_category_zarr",
+        batch_size=batch_size,
+        n_batches=n_batches,
+        warmup=warmup,
     )
-    print(f"  {result.summary_line()} | RSS {_rss()}")
-    return result
 
 
 def bench_annbatch_random(
     store_dir: str, batch_size: int, chunk_size: int,
     preload_nchunks: int, n_batches: int, warmup: int, seed: int,
-    progress_every: int,
 ) -> BenchmarkResult:
-    _header("annbatch Loader + RandomSampler")
-    t0 = time.perf_counter()
-    loader = Loader(
-        batch_size=batch_size, chunk_size=chunk_size,
-        preload_nchunks=preload_nchunks, shuffle=True,
-        preload_to_gpu=False, to_torch=False,
-        rng=np.random.default_rng(seed),
-    )
-    total_obs = _load_stores_into_loader(loader, store_dir)
-    n_stores = len(loader._train_datasets)
-    print(f"  init {time.perf_counter() - t0:.2f}s | {n_stores} stores, {total_obs:,} obs | RSS {_rss()}")
+    def build_loader():
+        loader = Loader(
+            batch_size=batch_size,
+            chunk_size=chunk_size,
+            preload_nchunks=preload_nchunks,
+            shuffle=True,
+            preload_to_gpu=False,
+            to_torch=False,
+            rng=np.random.default_rng(seed),
+        )
+        total_obs = _load_stores_into_loader(loader, store_dir)
+        n_stores = len(loader._train_datasets)
+        extra = {"chunk_size": chunk_size, "preload_nchunks": preload_nchunks}
+        summary = f"{n_stores} stores, {total_obs:,} obs"
+        return loader, extra, summary
 
-    result = benchmark_iterator(
-        iter(loader), n_batches=n_batches, batch_size=batch_size,
-        loader_name="annbatch_random", profile_name="tahoe",
-        warmup_batches=warmup,
-        extra={"chunk_size": chunk_size, "preload_nchunks": preload_nchunks},
-        progress_every=progress_every,
+    return _run_benchmark(
+        "annbatch Loader + RandomSampler",
+        build_loader,
+        loader_name="annbatch_random",
+        batch_size=batch_size,
+        n_batches=n_batches,
+        warmup=warmup,
     )
-    print(f"  {result.summary_line()} | RSS {_rss()}")
-    return result
 
 
 def bench_annbatch_categorical(
     store_dir: str, batch_size: int, chunk_size: int,
-    preload_nchunks: int, n_batches: int, warmup: int, progress_every: int,
+    preload_nchunks: int, n_batches: int, warmup: int,
 ) -> BenchmarkResult:
-    _header("annbatch Loader + CategoricalSampler (GroupedCollection)")
-    t0 = time.perf_counter()
-
-    collection = GroupedCollection(store_dir, mode="r")
-    gi = collection.group_index
-    total_obs = int(gi["count"].sum())
-
-    sampler = CategoricalSampler.from_collection(
-        collection,
-        chunk_size=chunk_size,
-        preload_nchunks=preload_nchunks,
-        batch_size=batch_size,
-        num_samples=(warmup + n_batches) * batch_size,
-        rng=np.random.default_rng(42),
-    )
-
     def _load_x(g: zarr.Group) -> ad.AnnData:
         return ad.AnnData(X=ad.io.sparse_dataset(g["X"]))
 
-    loader = Loader(batch_sampler=sampler, preload_to_gpu=False, to_torch=False)
-    loader.use_collection(collection, load_adata=_load_x)
-    print(f"  init {time.perf_counter() - t0:.2f}s | {len(gi)} groups, {total_obs:,} obs | RSS {_rss()}")
+    def build_loader():
+        collection = GroupedCollection(store_dir, mode="r")
+        gi = collection.group_index
+        total_obs = int(gi["count"].sum())
+        sampler = CategoricalSampler.from_collection(
+            collection,
+            chunk_size=chunk_size,
+            preload_nchunks=preload_nchunks,
+            batch_size=batch_size,
+            num_samples=(warmup + n_batches) * batch_size,
+            rng=np.random.default_rng(42),
+        )
+        loader = Loader(batch_sampler=sampler, preload_to_gpu=False, to_torch=False)
+        loader.use_collection(collection, load_adata=_load_x)
+        extra = {"chunk_size": chunk_size, "preload_nchunks": preload_nchunks}
+        summary = f"{len(gi)} groups, {total_obs:,} obs"
+        return loader, extra, summary
 
-    result = benchmark_iterator(
-        iter(loader), n_batches=n_batches, batch_size=batch_size,
-        loader_name="annbatch_categorical", profile_name="tahoe",
-        warmup_batches=warmup,
-        extra={"chunk_size": chunk_size, "preload_nchunks": preload_nchunks},
-        progress_every=progress_every,
+    return _run_benchmark(
+        "annbatch Loader + CategoricalSampler (GroupedCollection)",
+        build_loader,
+        loader_name="annbatch_categorical",
+        batch_size=batch_size,
+        n_batches=n_batches,
+        warmup=warmup,
     )
-    print(f"  {result.summary_line()} | RSS {_rss()}")
-    return result
 
 
 # ---------------------------------------------------------------------------
@@ -243,12 +268,11 @@ def bench_annbatch_categorical(
 @click.option("--preload_nchunks", type=int, default=64)
 @click.option("--n_batches", type=int, default=500)
 @click.option("--warmup", type=int, default=0, help="Optional warmup batches before timing.")
-@click.option("--progress_every", type=int, default=10, help="Print progress every N timed batches.")
 @click.option("--seed", type=int, default=42)
 @click.option("--output_dir", type=str, default=None)
 def main(
     store_dir, modes, batch_size, chunk_size, preload_nchunks,
-    n_batches, warmup, progress_every, seed, output_dir
+    n_batches, warmup, seed, output_dir
 ):
     if store_dir is None:
         store_dir = str(DATA_DIR / "tahoe_groupby_cell_line")
@@ -267,8 +291,6 @@ def main(
     print(f"  n_batches:       {n_batches:,}")
     if warmup:
         print(f"  warmup:          {warmup}")
-    if progress_every > 0:
-        print(f"  progress_every:  {progress_every}")
     _print_source_storage_summary(store_dir)
 
     results: list[BenchmarkResult] = []
@@ -276,19 +298,19 @@ def main(
     if "per_category" in modes:
         results.append(
             bench_per_category(
-                store_dir, batch_size, n_batches, warmup, seed, progress_every
+                store_dir, batch_size, n_batches, warmup, seed
             )
         )
     if "random" in modes:
         results.append(
             bench_annbatch_random(
-                store_dir, batch_size, chunk_size, preload_nchunks, n_batches, warmup, seed, progress_every
+                store_dir, batch_size, chunk_size, preload_nchunks, n_batches, warmup, seed
             )
         )
     if "categorical" in modes:
         results.append(
             bench_annbatch_categorical(
-                store_dir, batch_size, chunk_size, preload_nchunks, n_batches, warmup, progress_every
+                store_dir, batch_size, chunk_size, preload_nchunks, n_batches, warmup
             )
         )
 
