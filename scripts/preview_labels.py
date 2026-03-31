@@ -7,6 +7,8 @@ This script does not generate AnnData or write grouped stores. It only:
 
 By default synthetic previews use `n_obs` from `TAHOE_ZARR` when available, so
 the synthetic profiles match the Tahoe dataset size without generating data.
+Synthetic profile selection and filenames use the short profile name, while the
+display tag can be generated from category metadata or overridden per profile.
 
 Usage:
     python scripts/preview_labels.py
@@ -163,19 +165,18 @@ def _print_profile_plan(
     if shape_source is not None:
         print(f"  shape_src:   {shape_source}")
 
-    print(f"\n  {'Profile':<25} {'n_obs':>12} {'k':>5} {'Distribution':<18}")
-    print(f"  {'-' * 64}")
+    print(f"\n  {'Profile':<25} {'Tag':<44} {'n_obs':>12}")
+    print(f"  {'-' * 84}")
     for profile in profiles:
         print(
-            f"  {profile.name:<25} {profile.n_obs:>12,} "
-            f"{profile.n_categories:>5} {profile.distribution:<18}"
+            f"  {profile.name:<25} {profile.tag:<44} {profile.n_obs:>12,}"
         )
 
     print("\n  Category distribution summaries:")
     for profile in profiles:
         summary = profile_summary(profile)
         print(
-            f"    {profile.name}: min_group={summary['min_group_size']:,}  "
+            f"    {profile.tag}: min_group={summary['min_group_size']:,}  "
             f"max_group={summary['max_group_size']:,}  "
             f"median={summary['median_group_size']:,}  "
             f"imbalance={summary['imbalance_ratio']:.1f}x"
@@ -188,7 +189,7 @@ def _preview_single_synthetic(profile: CategoryProfile, plots_dir: Path) -> None
     counts = make_category_counts(profile)
     summary = profile_summary(profile)
     print(
-        f"  {profile.name}: n_obs={profile.n_obs:,}  k={profile.n_categories:,}  "
+        f"  {profile.tag}: n_obs={profile.n_obs:,}  k={profile.n_categories:,}  "
         f"min={summary['min_group_size']:,}  max={summary['max_group_size']:,}  "
         f"imbalance={summary['imbalance_ratio']:.1f}x"
     )
@@ -196,7 +197,7 @@ def _preview_single_synthetic(profile: CategoryProfile, plots_dir: Path) -> None
     plot_path = plots_dir / f"dist_{profile.name}.png"
     plot_category_distribution(
         counts,
-        profile.name,
+        profile.tag,
         plot_path,
         distribution_label=profile.distribution,
     )

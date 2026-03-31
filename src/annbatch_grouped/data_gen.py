@@ -72,91 +72,143 @@ class CategoryProfile:
     dominant_fraction: float = 0.5
     geometric_ratio: float = 0.8
     custom_weights: tuple[float, ...] | None = None
+    tag_override: str | None = None
     seed: int = 42
 
     def with_overrides(self, **kwargs) -> CategoryProfile:
         """Return a copy with the given fields replaced."""
         return replace(self, **kwargs)
 
+    @property
+    def tag(self) -> str:
+        """Display tag for plots and logs."""
+        if self.tag_override is not None:
+            return self.tag_override
+        return f"k{self.n_categories}_{self.distribution}"
+
 
 # ---------------------------------------------------------------------------
 # Predefined profiles
 # ---------------------------------------------------------------------------
 
-TAHOE_LIKE = CategoryProfile(
-    name="tahoe_like_cellline",
-    n_obs=10_000_000,
-    n_vars=62_714,
+DEFAULT_SYNTHETIC_N_OBS = 10_000_000
+DEFAULT_SYNTHETIC_N_VARS = 2_000
+TAHOE_LIKE_N_VARS = 62_714
+
+
+def _profile(
+    name: str,
+    *,
+    n_categories: int,
+    distribution: DistributionType,
+    n_obs: int = DEFAULT_SYNTHETIC_N_OBS,
+    n_vars: int = DEFAULT_SYNTHETIC_N_VARS,
+    tag_override: str | None = None,
+    **kwargs,
+) -> CategoryProfile:
+    """Build a profile with shared synthetic defaults."""
+    return CategoryProfile(
+        name=name,
+        n_obs=n_obs,
+        n_vars=n_vars,
+        n_categories=n_categories,
+        distribution=distribution,
+        tag_override=tag_override,
+        **kwargs,
+    )
+
+
+TAHOE_LIKE = _profile(
+    "tahoe_like_cellline",
+    n_obs=DEFAULT_SYNTHETIC_N_OBS,
+    n_vars=TAHOE_LIKE_N_VARS,
     n_categories=50,
     distribution="zipf",
     zipf_exponent=0.5,
     density=0.023,
 )
 
-FEW_CATEGORIES = CategoryProfile(
-    name="few_categories",
-    n_obs=10_000_000,
-    n_vars=2_000,
+FEW_CATEGORIES = _profile(
+    "few_categories",
     n_categories=3,
     distribution="uniform",
 )
 
-MANY_CATEGORIES_UNIFORM = CategoryProfile(
-    name="many_categories_uniform",
-    n_obs=10_000_000,
-    n_vars=2_000,
+MANY_CATEGORIES_UNIFORM = _profile(
+    "many_categories_uniform",
     n_categories=1_000,
     distribution="uniform",
 )
 
-ZIPF_REALISTIC = CategoryProfile(
-    name="zipf",
-    n_obs=10_000_000,
-    n_vars=2_000,
+ZIPF_1K = _profile(
+    "zipf_1k",
+    n_categories=1_000,
+    distribution="zipf",
+    zipf_exponent=1.5,
+)
+
+UNIFORM_1K = _profile(
+    "uniform_1k",
+    n_categories=1_000,
+    distribution="uniform",
+)
+
+ZIPF_100K = _profile(
+    "zipf_100k",
+    n_categories=100_000,
+    distribution="zipf",
+    zipf_exponent=1.5,
+)
+
+UNIFORM_100K = _profile(
+    "uniform_100k",
+    n_categories=100_000,
+    distribution="uniform",
+)
+
+ZIPF_REALISTIC = _profile(
+    "zipf",
     n_categories=100,
     distribution="zipf",
     zipf_exponent=1.5,
 )
 
-MANY_CATEGORIES_LINEAR = CategoryProfile(
-    name="many_categories_linear",
-    n_obs=10_000_000,
-    n_vars=2_000,
+MANY_CATEGORIES_LINEAR = _profile(
+    "many_categories_linear",
     n_categories=1_000,
     distribution="linear",
 )
 
-MANY_CATEGORIES_EXPONENTIAL = CategoryProfile(
-    name="many_categories_exponential",
-    n_obs=10_000_000,
-    n_vars=2_000,
+MANY_CATEGORIES_EXPONENTIAL = _profile(
+    "many_categories_exponential",
     n_categories=1_000,
     distribution="geometric",
     geometric_ratio=0.99,
 )
 
-SINGLE_DOMINANT = CategoryProfile(
-    name="single_dominant",
-    n_obs=10_000_000,
-    n_vars=2_000,
+SINGLE_DOMINANT = _profile(
+    "single_dominant",
     n_categories=20,
     distribution="single_dominant",
     dominant_fraction=0.5,
 )
 
-EXTREME_IMBALANCE = CategoryProfile(
-    name="extreme_imbalance",
-    n_obs=10_000_000,
-    n_vars=2_000,
+EXTREME_IMBALANCE = _profile(
+    "extreme_imbalance",
     n_categories=100,
     distribution="single_dominant",
     dominant_fraction=0.99,
+    tag_override="extreme_imbalance",
 )
 
 ALL_PROFILES: list[CategoryProfile] = [
     TAHOE_LIKE,
     FEW_CATEGORIES,
     MANY_CATEGORIES_UNIFORM,
+    ZIPF_1K,
+    UNIFORM_1K,
+    ZIPF_100K,
+    UNIFORM_100K,
     ZIPF_REALISTIC,
     MANY_CATEGORIES_LINEAR,
     MANY_CATEGORIES_EXPONENTIAL,
@@ -474,6 +526,7 @@ def profile_summary(profile: CategoryProfile) -> dict:
     counts = make_category_counts(profile)
     return {
         "name": profile.name,
+        "tag": profile.tag,
         "n_obs": profile.n_obs,
         "n_vars": profile.n_vars,
         "n_categories": profile.n_categories,
