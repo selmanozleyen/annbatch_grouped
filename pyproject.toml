@@ -17,7 +17,7 @@ classifiers = [
   "Programming Language :: Python :: 3.14",
 ]
 dependencies = [
-  "annbatch @ git+https://github.com/selmanozleyen/annbatch.git@feat/groupby-collection-v3",
+  "annbatch[zarrs] @ git+https://github.com/selmanozleyen/annbatch.git@feat/groupby-collection-v3",
   "anndata",
   "click",
   "numpy",
