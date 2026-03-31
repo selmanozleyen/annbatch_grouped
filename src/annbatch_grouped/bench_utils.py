@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import numpy as np
+from tqdm.auto import tqdm
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator
@@ -71,24 +72,42 @@ def benchmark_iterator(
     *,
     warmup_batches: int = 5,
     extra: dict | None = None,
+    progress_every: int | None = None,
 ) -> BenchmarkResult:
     """Time an iterator for `n_batches` iterations, returning a BenchmarkResult.
 
     The first `warmup_batches` are consumed but not counted in timing.
     """
-    for i, _batch in enumerate(iterator):
-        if i + 1 >= warmup_batches:
-            break
+    if warmup_batches > 0:
+        print(f"  Warmup: {warmup_batches} batches")
+        with tqdm(total=warmup_batches, desc="warmup", unit="batch") as pbar:
+            for i, _batch in enumerate(iterator):
+                pbar.update(1)
+                if progress_every is not None and progress_every > 0:
+                    if (i + 1) % progress_every == 0 or i + 1 == warmup_batches:
+                        print(f"    warmup {i + 1}/{warmup_batches}")
+                if i + 1 >= warmup_batches:
+                    break
 
     batch_times = []
     t_total = time.perf_counter()
-    for i, _batch in enumerate(iterator):
-        t_start = time.perf_counter()
-        # batch already materialized by the iterator
-        _ = _batch
-        batch_times.append(time.perf_counter() - t_start)
-        if i + 1 >= n_batches:
-            break
+    with tqdm(total=n_batches, desc="timed", unit="batch") as pbar:
+        for i, _batch in enumerate(iterator):
+            t_start = time.perf_counter()
+            _ = _batch
+            batch_times.append(time.perf_counter() - t_start)
+            pbar.update(1)
+            if progress_every is not None and progress_every > 0:
+                if (i + 1) % progress_every == 0 or i + 1 >= n_batches:
+                    elapsed = time.perf_counter() - t_total
+                    done_samples = (i + 1) * batch_size
+                    rate = done_samples / elapsed if elapsed > 0 else 0.0
+                    print(
+                        f"    timed {i + 1}/{n_batches} batches, "
+                        f"{rate:,.0f} samples/sec"
+                    )
+            if i + 1 >= n_batches:
+                break
     total_time = time.perf_counter() - t_total
 
     actual_batches = len(batch_times)

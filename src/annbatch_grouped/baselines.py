@@ -1,85 +1,102 @@
-"""Baseline loaders for comparison benchmarks.
-
-These provide alternative ways to load the same data so we can measure
-how annbatch's GroupedCollection + CategoricalSampler compares.
-"""
+"""Baseline loaders for comparison benchmarks."""
 
 from __future__ import annotations
 
+import os
 from typing import TYPE_CHECKING
 
 import anndata as ad
 import numpy as np
+import zarr
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
     from pathlib import Path
 
 
-class NaiveH5ADLoader:
-    """Load from an h5ad file using random indexing into the full matrix.
+class PerCategoryZarrLoader:
+    """Load from a directory of per-category zarr stores.
 
-    This is the simplest possible baseline: read the whole file, then yield
-    random batches. Not realistic for huge datasets but gives a floor/ceiling
-    for comparison.
+    Each zarr store is a standalone anndata (X as CSR, var, etc.) named
+    ``<category>.zarr``.  On each iteration a random category is chosen,
+    then ``batch_size`` rows are sampled from its X via sparse_dataset
+    (backed mode -- only the requested rows are read from disk).
+
+    Parameters
+    ----------
+    store_dir
+        Directory containing ``<category>.zarr`` stores.
+    batch_size
+        Rows per batch.
+    n_batches
+        Total batches to yield.
+    seed
+        RNG seed.
+    weighted
+        If True, categories are sampled proportional to their n_obs.
+        If False, uniform random.
     """
 
     def __init__(
         self,
-        h5ad_path: str | Path,
+        store_dir: str | Path,
         batch_size: int,
         n_batches: int,
         seed: int = 42,
-    ):
-        self._adata = ad.read_h5ad(h5ad_path)
-        self._batch_size = batch_size
-        self._n_batches = n_batches
-        self._rng = np.random.default_rng(seed)
-
-    def __iter__(self) -> Iterator[dict]:
-        n_obs = self._adata.shape[0]
-        for _ in range(self._n_batches):
-            idx = self._rng.choice(n_obs, size=self._batch_size, replace=False)
-            yield {
-                "X": self._adata.X[idx],
-                "obs": self._adata.obs.iloc[idx],
-            }
-
-    def __len__(self) -> int:
-        return self._n_batches
-
-
-class NaiveCategoryLoader:
-    """Load from an in-memory AnnData, filtering to a single category per batch.
-
-    This simulates what you'd do without annbatch: load everything into memory,
-    group by category, randomly pick a category, then sample from it.
-    """
-
-    def __init__(
-        self,
-        adata: ad.AnnData,
-        groupby_key: str,
-        batch_size: int,
-        n_batches: int,
-        seed: int = 42,
+        weighted: bool = False,
     ):
         self._batch_size = batch_size
         self._n_batches = n_batches
         self._rng = np.random.default_rng(seed)
 
-        categories = adata.obs[groupby_key].cat.categories
-        self._category_indices = {cat: np.where(adata.obs[groupby_key] == cat)[0] for cat in categories}
-        self._categories = list(categories)
-        self._X = adata.X
+        store_dir = str(store_dir)
+        names = sorted(
+            d.replace(".zarr", "")
+            for d in os.listdir(store_dir)
+            if d.endswith(".zarr")
+        )
+        if not names:
+            raise ValueError(f"No .zarr stores found in {store_dir}")
+
+        self._categories: list[str] = []
+        self._groups: dict[str, zarr.Group] = {}
+        self._n_obs: dict[str, int] = {}
+
+        for name in names:
+            g = zarr.open_group(os.path.join(store_dir, f"{name}.zarr"), mode="r")
+            shape = g["X"].attrs.get("shape", None)
+            if shape is None:
+                continue
+            n = int(shape[0])
+            self._categories.append(name)
+            self._groups[name] = g
+            self._n_obs[name] = n
+
+        total = sum(self._n_obs.values())
+        if weighted:
+            self._weights = np.array(
+                [self._n_obs[c] / total for c in self._categories]
+            )
+        else:
+            self._weights = None
+
+    @property
+    def categories(self) -> list[str]:
+        return list(self._categories)
+
+    @property
+    def n_obs_per_category(self) -> dict[str, int]:
+        return dict(self._n_obs)
 
     def __iter__(self) -> Iterator[dict]:
         for _ in range(self._n_batches):
-            cat = self._rng.choice(self._categories)
-            pool = self._category_indices[cat]
-            idx = self._rng.choice(pool, size=min(self._batch_size, len(pool)), replace=True)
+            cat = self._rng.choice(self._categories, p=self._weights)
+            n = self._n_obs[cat]
+            size = min(self._batch_size, n)
+            idx = np.sort(self._rng.choice(n, size=size, replace=size > n))
+            X = ad.io.sparse_dataset(self._groups[cat]["X"])
             yield {
-                "X": self._X[idx],
+                "X": X[idx],
                 "category": cat,
             }
 
