@@ -9,7 +9,11 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from matplotlib.ticker import FuncFormatter
 import numpy as np
+import seaborn as sns
+
+sns.set_theme(style="whitegrid", context="notebook")
 
 
 def plot_category_distribution(
@@ -23,40 +27,73 @@ def plot_category_distribution(
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    k = len(counts)
-    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+    sorted_counts = np.sort(np.asarray(counts, dtype=np.int64))[::-1]
+    k = len(sorted_counts)
+    ranks = np.arange(1, k + 1)
+    total = int(sorted_counts.sum())
+    cumulative_share = np.cumsum(sorted_counts) / max(total, 1)
+    mean_count = float(sorted_counts.mean())
+    median_count = float(np.median(sorted_counts))
+    top1_share = 100.0 * sorted_counts[0] / max(total, 1)
+    top5_share = 100.0 * sorted_counts[: min(5, k)].sum() / max(total, 1)
+    top10_share = 100.0 * sorted_counts[: min(10, k)].sum() / max(total, 1)
+    rank_50 = int(np.searchsorted(cumulative_share, 0.50) + 1)
+    rank_90 = int(np.searchsorted(cumulative_share, 0.90) + 1)
 
-    # Left: bar chart (sorted descending)
-    sorted_counts = np.sort(counts)[::-1]
+    blue = sns.color_palette("crest", 6)[4]
+    orange = sns.color_palette("flare", 6)[3]
+
+    fig, axes = plt.subplots(1, 2, figsize=(15, 5.5))
+
     ax = axes[0]
     if k <= 60:
-        ax.bar(range(k), sorted_counts, color="#3b82f6", edgecolor="none")
-        ax.set_xlabel("Category (sorted by size)")
+        ax.bar(ranks, sorted_counts, color=blue, edgecolor="white", linewidth=0.4)
     else:
-        ax.plot(range(k), sorted_counts, color="#3b82f6", linewidth=1.5)
-        ax.fill_between(range(k), sorted_counts, alpha=0.3, color="#3b82f6")
-        ax.set_xlabel("Category rank")
+        ax.plot(ranks, sorted_counts, color=blue, linewidth=2.0)
+        ax.fill_between(ranks, sorted_counts, alpha=0.20, color=blue)
+    ax.set_xlabel("Category rank (largest to smallest)")
     ax.set_ylabel("Observations")
-    ax.set_title(f"{profile_name}: category sizes")
-    ax.ticklabel_format(axis="y", style="scientific", scilimits=(0, 0))
+    ax.set_title("Counts by category rank")
+    ax.set_xlim(1, k)
+    ax.yaxis.set_major_formatter(FuncFormatter(lambda value, _: f"{int(value):,}"))
 
-    # Right: log-scale version
     ax = axes[1]
-    if k <= 60:
-        ax.bar(range(k), sorted_counts, color="#f59e0b", edgecolor="none")
-    else:
-        ax.plot(range(k), sorted_counts, color="#f59e0b", linewidth=1.5)
-        ax.fill_between(range(k), sorted_counts, alpha=0.3, color="#f59e0b")
-    ax.set_yscale("log")
-    ax.set_ylabel("Observations (log)")
-    ax.set_xlabel("Category rank")
-    ax.set_title(f"{profile_name}: log scale")
+    ax.plot(ranks, 100.0 * cumulative_share, color=orange, linewidth=2.5)
+    ax.fill_between(ranks, 100.0 * cumulative_share, alpha=0.18, color=orange)
+    for y in (50, 75, 90, 95):
+        ax.axhline(y, color="#94a3b8", linewidth=0.8, linestyle="--", alpha=0.6)
+    ax.set_xlabel("Category rank (largest to smallest)")
+    ax.set_ylabel("Cumulative share (%)")
+    ax.set_title("Cumulative coverage")
+    ax.set_xlim(1, k)
+    ax.set_ylim(0, 100)
 
-    info = f"n_obs={int(counts.sum()):,}  k={k}  min={int(counts.min()):,}  max={int(counts.max()):,}"
+    summary_text = (
+        f"mean={mean_count:,.0f}\n"
+        f"median={median_count:,.0f}\n"
+        f"top1={top1_share:.1f}%\n"
+        f"top5={top5_share:.1f}%\n"
+        f"top10={top10_share:.1f}%\n"
+        f"50% by rank {rank_50}\n"
+        f"90% by rank {rank_90}"
+    )
+    ax.text(
+        0.98,
+        0.04,
+        summary_text,
+        transform=ax.transAxes,
+        ha="right",
+        va="bottom",
+        fontsize=9,
+        bbox={"boxstyle": "round,pad=0.35", "facecolor": "white", "edgecolor": "#cbd5e1", "alpha": 0.95},
+    )
+
+    fig.suptitle(profile_name, fontsize=14, fontweight="semibold")
+    info = f"n_obs={total:,}  k={k}  min={int(sorted_counts.min()):,}  max={int(sorted_counts.max()):,}"
     if distribution_label:
         info = f"{distribution_label} | {info}"
-    fig.suptitle(info, fontsize=9, y=0.02)
-    fig.tight_layout(rect=[0, 0.04, 1, 1])
+    fig.text(0.5, 0.01, info, ha="center", va="bottom", fontsize=9, color="#475569")
+    fig.tight_layout(rect=[0, 0.05, 1, 0.95])
     fig.savefig(output_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
     return output_path

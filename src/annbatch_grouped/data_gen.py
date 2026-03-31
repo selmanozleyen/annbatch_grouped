@@ -83,7 +83,7 @@ class CategoryProfile:
 # ---------------------------------------------------------------------------
 
 TAHOE_LIKE = CategoryProfile(
-    name="tahoe_like",
+    name="tahoe_like_cellline",
     n_obs=10_000_000,
     n_vars=62_714,
     n_categories=50,
@@ -109,12 +109,21 @@ MANY_CATEGORIES = CategoryProfile(
 )
 
 ZIPF_REALISTIC = CategoryProfile(
-    name="zipf_realistic",
+    name="zipf",
     n_obs=10_000_000,
     n_vars=2_000,
     n_categories=100,
     distribution="zipf",
     zipf_exponent=1.5,
+)
+
+MANY_CATEGORIES_UNBALANCED = CategoryProfile(
+    name="many_categories_unbalanced",
+    n_obs=10_000_000,
+    n_vars=2_000,
+    n_categories=1_000,
+    distribution="zipf",
+    zipf_exponent=2.0,
 )
 
 SINGLE_DOMINANT = CategoryProfile(
@@ -140,6 +149,7 @@ ALL_PROFILES: list[CategoryProfile] = [
     FEW_CATEGORIES,
     MANY_CATEGORIES,
     ZIPF_REALISTIC,
+    MANY_CATEGORIES_UNBALANCED,
     SINGLE_DOMINANT,
     EXTREME_IMBALANCE,
 ]
@@ -302,6 +312,124 @@ def _x_n_vars(x_elem) -> int:
         if shape is not None and len(shape) >= 2:
             return int(shape[1])
     return 0
+
+
+def _obs_n_rows(obs_elem) -> int:
+    """Extract n_obs from an obs group without reading the full table."""
+    if "_index" in obs_elem:
+        return int(obs_elem["_index"].shape[0])
+
+    for key in obs_elem.keys():
+        elem = obs_elem[key]
+        if hasattr(elem, "shape") and elem.shape:
+            return int(elem.shape[0])
+        if hasattr(elem, "attrs"):
+            shape = elem.attrs.get("shape", None)
+            if shape:
+                return int(shape[0])
+    return 0
+
+
+def _obs_columns(obs_elem) -> list[str]:
+    """List obs columns from a backing group."""
+    return [str(key) for key in obs_elem.keys() if str(key) != "_index"]
+
+
+def _normalize_string_values(values) -> np.ndarray:
+    """Decode byte strings in a 1D array-like object."""
+    arr = np.asarray(values, dtype=object)
+    return np.array([v.decode() if isinstance(v, bytes) else v for v in arr], dtype=object)
+
+
+def _read_obs_column_from_group(obs_elem, column: str) -> pd.Series:
+    """Read a single obs column from an h5ad/zarr-backed obs group."""
+    if column not in obs_elem:
+        raise KeyError(column)
+
+    elem = obs_elem[column]
+
+    if hasattr(elem, "keys") and "codes" in elem and "categories" in elem:
+        codes = np.asarray(elem["codes"])
+        categories = _normalize_string_values(elem["categories"])
+        values = np.empty(codes.shape[0], dtype=object)
+        valid = codes >= 0
+        values[valid] = categories[codes[valid]]
+        values[~valid] = None
+        return pd.Series(values, name=column)
+
+    values = ad.io.read_elem(elem)
+    if isinstance(values, pd.Series):
+        series = values.copy()
+        series.name = column
+        if series.dtype == object:
+            series = pd.Series(_normalize_string_values(series.to_numpy()), name=column)
+        return series.reset_index(drop=True)
+    if isinstance(values, pd.Categorical):
+        return pd.Series(_normalize_string_values(values.astype(object)), name=column)
+    if hasattr(values, "to_numpy"):
+        return pd.Series(_normalize_string_values(values.to_numpy()), name=column)
+    return pd.Series(_normalize_string_values(values), name=column)
+
+
+def read_shape_lazy(path: str | Path) -> tuple[int, int]:
+    """Read only dataset shape from an h5ad or zarr file."""
+    path = Path(path)
+    spath = str(path)
+
+    if spath.endswith(".h5ad"):
+        import h5py
+
+        with h5py.File(spath, "r") as f:
+            n_obs = _obs_n_rows(f["obs"]) if "obs" in f else 0
+            n_vars = _x_n_vars(f["X"]) if "X" in f else 0
+        return n_obs, n_vars
+
+    import zarr
+
+    g = zarr.open_group(spath, mode="r")
+    n_obs = _obs_n_rows(g["obs"]) if "obs" in g else 0
+    n_vars = _x_n_vars(g["X"]) if "X" in g else 0
+    return n_obs, n_vars
+
+
+def list_obs_columns(path: str | Path) -> list[str]:
+    """List obs column names without reading the full obs table."""
+    path = Path(path)
+    spath = str(path)
+
+    if spath.endswith(".h5ad"):
+        import h5py
+
+        with h5py.File(spath, "r") as f:
+            return _obs_columns(f["obs"]) if "obs" in f else []
+
+    import zarr
+
+    g = zarr.open_group(spath, mode="r")
+    return _obs_columns(g["obs"]) if "obs" in g else []
+
+
+def read_obs_column_lazy(path: str | Path, column: str) -> pd.Series:
+    """Read a single obs column from an h5ad or zarr file."""
+    path = Path(path)
+    spath = str(path)
+
+    if spath.endswith(".h5ad"):
+        import h5py
+
+        with h5py.File(spath, "r") as f:
+            return _read_obs_column_from_group(f["obs"], column)
+
+    import zarr
+
+    g = zarr.open_group(spath, mode="r")
+    return _read_obs_column_from_group(g["obs"], column)
+
+
+def read_obs_value_counts_lazy(path: str | Path, column: str) -> pd.Series:
+    """Read one obs column and return value counts sorted descending."""
+    values = read_obs_column_lazy(path, column)
+    return values.value_counts(dropna=False)
 
 
 def read_obs_lazy(path: str | Path) -> tuple[pd.DataFrame, tuple[int, int]]:
