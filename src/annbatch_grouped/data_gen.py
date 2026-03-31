@@ -101,8 +101,8 @@ FEW_CATEGORIES = CategoryProfile(
     distribution="uniform",
 )
 
-MANY_CATEGORIES = CategoryProfile(
-    name="many_categories",
+MANY_CATEGORIES_UNIFORM = CategoryProfile(
+    name="many_categories_uniform",
     n_obs=10_000_000,
     n_vars=2_000,
     n_categories=1_000,
@@ -118,12 +118,21 @@ ZIPF_REALISTIC = CategoryProfile(
     zipf_exponent=1.5,
 )
 
-MANY_CATEGORIES_UNBALANCED = CategoryProfile(
-    name="many_categories_unbalanced",
+MANY_CATEGORIES_LINEAR = CategoryProfile(
+    name="many_categories_linear",
     n_obs=10_000_000,
     n_vars=2_000,
     n_categories=1_000,
     distribution="linear",
+)
+
+MANY_CATEGORIES_EXPONENTIAL = CategoryProfile(
+    name="many_categories_exponential",
+    n_obs=10_000_000,
+    n_vars=2_000,
+    n_categories=1_000,
+    distribution="geometric",
+    geometric_ratio=0.99,
 )
 
 SINGLE_DOMINANT = CategoryProfile(
@@ -147,9 +156,10 @@ EXTREME_IMBALANCE = CategoryProfile(
 ALL_PROFILES: list[CategoryProfile] = [
     TAHOE_LIKE,
     FEW_CATEGORIES,
-    MANY_CATEGORIES,
+    MANY_CATEGORIES_UNIFORM,
     ZIPF_REALISTIC,
-    MANY_CATEGORIES_UNBALANCED,
+    MANY_CATEGORIES_LINEAR,
+    MANY_CATEGORIES_EXPONENTIAL,
     SINGLE_DOMINANT,
     EXTREME_IMBALANCE,
 ]

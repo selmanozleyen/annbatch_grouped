@@ -126,6 +126,27 @@ def _default_real_plot_keys(src_path: Path, name: str, label: str | None) -> lis
     return [DEFAULT_REAL_LABEL]
 
 
+def _maybe_clean_plots(plots_dir: Path, *, yes: bool) -> None:
+    """Prompt to clean existing plot files before writing new ones."""
+    existing = sorted(plots_dir.glob("dist_*.png"))
+    if not existing:
+        return
+
+    if yes:
+        return
+
+    should_clean = click.confirm(
+        f"Clean {len(existing)} existing plot(s) in {plots_dir} before generating new ones?",
+        default=False,
+    )
+    if not should_clean:
+        return
+
+    for path in existing:
+        path.unlink()
+    print(f"  Removed {len(existing)} existing plot(s) from {plots_dir}")
+
+
 def _print_profile_plan(
     profiles: list[CategoryProfile],
     output_base: Path,
@@ -287,6 +308,7 @@ def _preview_real_data(
 )
 @click.option("--n_obs", type=int, default=None, help="Override n_obs for all selected synthetic profiles")
 @click.option("--n_vars", type=int, default=None, help="Override n_vars for all selected synthetic profiles")
+@click.option("--yes", "-y", is_flag=True, default=False, help="Skip the clean-plots prompt")
 def main(
     from_path: str | None,
     name: str | None,
@@ -295,11 +317,13 @@ def main(
     store_dir: str | None,
     n_obs: int | None,
     n_vars: int | None,
+    yes: bool,
 ):
     output_base = Path(store_dir) if store_dir else RESULTS_DIR
     output_base.mkdir(parents=True, exist_ok=True)
     plots_dir = output_base / "plots"
     plots_dir.mkdir(parents=True, exist_ok=True)
+    _maybe_clean_plots(plots_dir, yes=yes)
 
     if from_path is not None or label is not None:
         if profile is not None:

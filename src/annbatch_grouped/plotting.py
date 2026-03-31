@@ -10,6 +10,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.ticker import FuncFormatter
+from matplotlib.ticker import MaxNLocator
 import numpy as np
 import seaborn as sns
 
@@ -54,8 +55,11 @@ def plot_category_distribution(
     ax.set_xlabel("Category rank (largest to smallest)")
     ax.set_ylabel("Observations")
     ax.set_title("Counts by category rank")
-    ax.set_xlim(1, k)
+    ax.set_xlim(0.5, k + 0.5)
     ax.yaxis.set_major_formatter(FuncFormatter(lambda value, _: f"{int(value):,}"))
+    ax.xaxis.set_major_locator(MaxNLocator(integer=True))
+    if k <= 20:
+        ax.set_xticks(ranks)
 
     ax = axes[1]
     ax.plot(ranks, 100.0 * cumulative_share, color=orange, linewidth=2.5)
@@ -65,8 +69,11 @@ def plot_category_distribution(
     ax.set_xlabel("Category rank (largest to smallest)")
     ax.set_ylabel("Cumulative share (%)")
     ax.set_title("Cumulative coverage")
-    ax.set_xlim(1, k)
+    ax.set_xlim(0.5, k + 0.5)
     ax.set_ylim(0, 100)
+    ax.xaxis.set_major_locator(MaxNLocator(integer=True))
+    if k <= 20:
+        ax.set_xticks(ranks)
 
     summary_text = (
         f"mean={mean_count:,.0f}\n"
