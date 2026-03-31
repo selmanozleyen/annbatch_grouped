@@ -15,7 +15,7 @@ if TYPE_CHECKING:
     pass
 
 
-DistributionType = Literal["uniform", "zipf", "single_dominant", "geometric", "custom"]
+DistributionType = Literal["uniform", "zipf", "single_dominant", "geometric", "linear", "custom"]
 
 
 @dataclass(frozen=True)
@@ -38,6 +38,7 @@ class CategoryProfile:
         - "zipf": power-law (few large, many small)
         - "single_dominant": one category gets `dominant_fraction`, rest split equally
         - "geometric": exponentially decaying sizes
+        - "linear": linearly decreasing sizes by rank
         - "custom": provide explicit `custom_weights`
     groupby_key
         Name of the obs column holding category labels.
@@ -122,8 +123,7 @@ MANY_CATEGORIES_UNBALANCED = CategoryProfile(
     n_obs=10_000_000,
     n_vars=2_000,
     n_categories=1_000,
-    distribution="zipf",
-    zipf_exponent=2.0,
+    distribution="linear",
 )
 
 SINGLE_DOMINANT = CategoryProfile(
@@ -192,6 +192,9 @@ def make_category_counts(profile: CategoryProfile) -> np.ndarray:
         if not 0.0 < r < 1.0:
             raise ValueError(f"geometric_ratio must be in (0, 1), got {r}")
         weights = np.power(r, np.arange(k, dtype=np.float64))
+
+    elif profile.distribution == "linear":
+        weights = np.arange(k, 0, -1, dtype=np.float64)
 
     elif profile.distribution == "custom":
         if profile.custom_weights is None:
