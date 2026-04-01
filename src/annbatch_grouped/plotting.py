@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import textwrap
 
 import matplotlib
 
@@ -15,6 +16,18 @@ import numpy as np
 import seaborn as sns
 
 sns.set_theme(style="whitegrid", context="notebook")
+
+
+def _format_rank_tick(value: float, _pos: float) -> str:
+    """Compact category-rank tick labels for large values."""
+    ivalue = int(round(value))
+    if ivalue <= 0:
+        return ""
+    if ivalue >= 1000:
+        if ivalue % 1000 == 0:
+            return f"{ivalue // 1000}k"
+        return f"{ivalue / 1000:.1f}k"
+    return f"{ivalue}"
 
 
 def plot_category_distribution(
@@ -111,12 +124,18 @@ def plot_category_distribution_axes(axes, payload: dict) -> None:
     ax.set_title(profile_name, loc="left", fontsize=11, fontweight="bold")
     ax.set_xlim(0.5, k + 0.5)
     ax.yaxis.set_major_formatter(FuncFormatter(lambda value, _: f"{int(value):,}"))
-    ax.xaxis.set_major_locator(MaxNLocator(integer=True))
     if k <= 20:
         ax.set_xticks(ranks)
+    elif k <= 60:
+        ax.xaxis.set_major_locator(MaxNLocator(nbins=8, integer=True))
+    else:
+        ax.xaxis.set_major_locator(MaxNLocator(nbins=6, integer=True))
+    if k >= 1000:
+        ax.xaxis.set_major_formatter(FuncFormatter(_format_rank_tick))
     info = f"n_obs={total:,}  k={k}  min={int(sorted_counts.min()):,}  max={int(sorted_counts.max()):,}"
     if distribution_label:
         info = f"{distribution_label} | {info}"
+    info = textwrap.fill(info, width=34, break_long_words=False, break_on_hyphens=False)
     ax.text(
         0.02,
         0.98,
@@ -124,7 +143,7 @@ def plot_category_distribution_axes(axes, payload: dict) -> None:
         transform=ax.transAxes,
         ha="left",
         va="top",
-        fontsize=8,
+        fontsize=7.5,
         color="#475569",
         bbox={"boxstyle": "round,pad=0.25", "facecolor": "white", "edgecolor": "#cbd5e1", "alpha": 0.9},
     )
@@ -135,13 +154,18 @@ def plot_category_distribution_axes(axes, payload: dict) -> None:
     for y in (50, 75, 90, 95):
         ax.axhline(y, color="#94a3b8", linewidth=0.8, linestyle="--", alpha=0.6)
     ax.set_xlabel("Category rank")
-    ax.set_ylabel("Cumulative share (%)")
+    ax.set_ylabel("Cumulative share (%)", labelpad=2)
     ax.set_title("Coverage", fontsize=11)
     ax.set_xlim(0.5, k + 0.5)
     ax.set_ylim(0, 100)
-    ax.xaxis.set_major_locator(MaxNLocator(integer=True))
     if k <= 20:
         ax.set_xticks(ranks)
+    elif k <= 60:
+        ax.xaxis.set_major_locator(MaxNLocator(nbins=8, integer=True))
+    else:
+        ax.xaxis.set_major_locator(MaxNLocator(nbins=6, integer=True))
+    if k >= 1000:
+        ax.xaxis.set_major_formatter(FuncFormatter(_format_rank_tick))
 
     summary_text = (
         f"mean={mean_count:,.0f}\n"

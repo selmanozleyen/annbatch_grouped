@@ -76,15 +76,13 @@ def _parse_run(run_path: Path) -> BenchOutcome:
     payload = json.loads(run_path.read_text())
     status = payload["status"]
     metrics = payload.get("metrics", {})
-    trace = []
-    for point in payload.get("throughput_trace", []):
-        if "elapsed_s" in point and "batch_samples_per_sec" in point:
-            trace.append((float(point["elapsed_s"]), float(point["batch_samples_per_sec"])))
-            continue
-        samples_seen = float(point["samples_seen"])
-        samples_per_sec = float(point["samples_per_sec"])
-        elapsed_s = samples_seen / samples_per_sec if samples_per_sec > 0 else 0.0
-        trace.append((elapsed_s, samples_per_sec))
+    trace = [
+        (
+            float(point.get("elapsed_s", point["samples_seen"] / point["samples_per_sec"])),
+            float(point.get("batch_samples_per_sec", point["samples_per_sec"])),
+        )
+        for point in payload.get("throughput_trace", [])
+    ]
     return BenchOutcome(
         experiment=str(payload.get("experiment", run_path.parent.parent.name)),
         mode=str(payload["mode"]),
@@ -124,7 +122,7 @@ def _lookup_outcome(outcomes: dict[tuple[str, str], BenchOutcome], groupby_key: 
 def _plot_distribution_panel(fig, host_ax, distribution_dir: Path, groupby_key: str) -> None:
     data_path = _distribution_data_file(distribution_dir, groupby_key)
     if data_path.exists():
-        nested = host_ax.get_subplotspec().subgridspec(1, 2, wspace=0.22)
+        nested = host_ax.get_subplotspec().subgridspec(1, 2, wspace=0.34)
         host_ax.remove()
         dist_axes = np.array([fig.add_subplot(nested[0, 0]), fig.add_subplot(nested[0, 1])], dtype=object)
         payload = load_distribution_payload(data_path)
@@ -194,7 +192,7 @@ def _plot_mode_panel(ax, outcome: BenchOutcome | None, mode: str, max_elapsed_s:
     ax.set_xlim(0, max(max_elapsed_s, float(x[-1])) * 1.02)
     ax.set_ylim(0, max(max_sps, float(y.max())) * 1.08 if max_sps > 0 else float(y.max()) * 1.08)
     ax.set_xlabel("elapsed seconds")
-    ax.set_ylabel("batch samples/sec")
+    ax.set_ylabel("samples/sec")
     ax.text(
         0.98,
         0.95,
