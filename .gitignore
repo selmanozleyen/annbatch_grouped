@@ -28,3 +28,4 @@ __pycache__/
 
 
 *.log
+tmp_*.zarr/
