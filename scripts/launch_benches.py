@@ -15,6 +15,7 @@ from annbatch_grouped.default_profile_lists import (
 )
 
 DEFAULT_MODES = ("random", "categorical", "scdataset")
+GROUPBY_MODES = ("categorical", "scdataset")
 
 
 def _default_groupby_keys() -> list[str]:
@@ -39,10 +40,17 @@ def main(dry_run: bool, experiment: str | None) -> None:
     print(f"  experiment:     {experiment}")
     print(f"  groupby keys:   {', '.join(groupby_keys)}")
     print(f"  modes:          {', '.join(DEFAULT_MODES)}")
-    print(f"  total jobs:     {len(groupby_keys) * len(DEFAULT_MODES)}")
+    total_jobs = 1 + len(groupby_keys) * len(GROUPBY_MODES)
+    print(f"  total jobs:     {total_jobs}")
+
+    random_groupby_key = groupby_keys[0]
+    command = ["sbatch", str(bench_sbatch), "random", random_groupby_key, experiment]
+    print(f"\n$ {shlex.join(command)}")
+    if not dry_run:
+        subprocess.run(command, check=True)
 
     for groupby_key in groupby_keys:
-        for mode in DEFAULT_MODES:
+        for mode in GROUPBY_MODES:
             command = ["sbatch", str(bench_sbatch), mode, groupby_key, experiment]
             print(f"\n$ {shlex.join(command)}")
             if not dry_run:

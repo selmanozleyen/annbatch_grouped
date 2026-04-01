@@ -27,8 +27,64 @@ def plot_category_distribution(
     """Bar chart of per-category observation counts. Returns saved path."""
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = _build_distribution_payload(
+        counts,
+        profile_name,
+        distribution_label=distribution_label,
+    )
 
+    fig, axes = plt.subplots(1, 2, figsize=(15, 5.5))
+    plot_category_distribution_axes(axes, payload)
+    fig.tight_layout(rect=[0, 0.05, 1, 0.95])
+    fig.savefig(output_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+    data_path = distribution_data_path(output_path)
+    with open(data_path, "w") as handle:
+        json.dump(payload, handle, indent=2)
+        handle.write("\n")
+    return output_path
+
+
+def distribution_data_path(output_path: Path) -> Path:
+    """Return the JSON sidecar path for a distribution plot."""
+    return Path(output_path).with_suffix(".json")
+
+
+def load_distribution_payload(path: Path) -> dict:
+    """Load a saved distribution payload from disk."""
+    with open(path) as handle:
+        return json.load(handle)
+
+
+def _build_distribution_payload(
+    counts: np.ndarray,
+    profile_name: str,
+    *,
+    distribution_label: str = "",
+) -> dict:
+    """Build a serializable payload for a category distribution plot."""
     sorted_counts = np.sort(np.asarray(counts, dtype=np.int64))[::-1]
+    return {
+        "profile_name": profile_name,
+        "distribution_label": distribution_label,
+        "sorted_counts": sorted_counts.tolist(),
+    }
+
+
+def plot_category_distribution_axes(axes, payload: dict) -> None:
+    """Render a category distribution into a pair of matplotlib axes."""
+    sorted_counts = np.asarray(payload["sorted_counts"], dtype=np.int64)
+    profile_name = str(payload.get("profile_name", ""))
+    distribution_label = str(payload.get("distribution_label", ""))
+
+    if sorted_counts.size == 0:
+        for ax in axes:
+            ax.text(0.5, 0.5, "no data", ha="center", va="center", fontsize=11, color="#64748b")
+            ax.set_xticks([])
+            ax.set_yticks([])
+        return
+
     k = len(sorted_counts)
     ranks = np.arange(1, k + 1)
     total = int(sorted_counts.sum())
@@ -44,17 +100,15 @@ def plot_category_distribution(
     blue = sns.color_palette("crest", 6)[4]
     orange = sns.color_palette("flare", 6)[3]
 
-    fig, axes = plt.subplots(1, 2, figsize=(15, 5.5))
-
     ax = axes[0]
     if k <= 60:
         ax.bar(ranks, sorted_counts, color=blue, edgecolor="white", linewidth=0.4)
     else:
         ax.plot(ranks, sorted_counts, color=blue, linewidth=2.0)
         ax.fill_between(ranks, sorted_counts, alpha=0.20, color=blue)
-    ax.set_xlabel("Category rank (largest to smallest)")
+    ax.set_xlabel("Category rank")
     ax.set_ylabel("Observations")
-    ax.set_title("Counts by category rank")
+    ax.set_title(profile_name, loc="left", fontsize=11, fontweight="bold")
     ax.set_xlim(0.5, k + 0.5)
     ax.yaxis.set_major_formatter(FuncFormatter(lambda value, _: f"{int(value):,}"))
     ax.xaxis.set_major_locator(MaxNLocator(integer=True))
@@ -66,9 +120,9 @@ def plot_category_distribution(
     ax.fill_between(ranks, 100.0 * cumulative_share, alpha=0.18, color=orange)
     for y in (50, 75, 90, 95):
         ax.axhline(y, color="#94a3b8", linewidth=0.8, linestyle="--", alpha=0.6)
-    ax.set_xlabel("Category rank (largest to smallest)")
+    ax.set_xlabel("Category rank")
     ax.set_ylabel("Cumulative share (%)")
-    ax.set_title("Cumulative coverage")
+    ax.set_title("Coverage", fontsize=11)
     ax.set_xlim(0.5, k + 0.5)
     ax.set_ylim(0, 100)
     ax.xaxis.set_major_locator(MaxNLocator(integer=True))
@@ -95,15 +149,19 @@ def plot_category_distribution(
         bbox={"boxstyle": "round,pad=0.35", "facecolor": "white", "edgecolor": "#cbd5e1", "alpha": 0.95},
     )
 
-    fig.suptitle(profile_name, fontsize=14, fontweight="semibold")
     info = f"n_obs={total:,}  k={k}  min={int(sorted_counts.min()):,}  max={int(sorted_counts.max()):,}"
     if distribution_label:
         info = f"{distribution_label} | {info}"
-    fig.text(0.5, 0.01, info, ha="center", va="bottom", fontsize=9, color="#475569")
-    fig.tight_layout(rect=[0, 0.05, 1, 0.95])
-    fig.savefig(output_path, dpi=150, bbox_inches="tight")
-    plt.close(fig)
-    return output_path
+    axes[1].text(
+        0.98,
+        -0.22,
+        info,
+        transform=axes[1].transAxes,
+        ha="right",
+        va="top",
+        fontsize=8,
+        color="#475569",
+    )
 
 
 def plot_all_distributions(

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import textwrap
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -19,10 +20,16 @@ from annbatch_grouped.default_profile_lists import (
     DEFAULT_PREVIEW_APPEND_PROFILES,
 )
 from annbatch_grouped.paths import DATA_DIR, RESULTS_DIR
+from annbatch_grouped.plotting import (
+    distribution_data_path,
+    load_distribution_payload,
+    plot_category_distribution_axes,
+)
 
 sns.set_theme(style="whitegrid", context="notebook")
 
-DEFAULT_MODES = ("random", "categorical")
+DEFAULT_MODES = ("random", "categorical", "scdataset")
+GLOBAL_MODES = {"random"}
 
 
 @dataclass(frozen=True)
@@ -61,6 +68,10 @@ def _distribution_plot_path(distribution_dir: Path, groupby_key: str) -> Path:
     return distribution_dir / f"dist_{groupby_key}.png"
 
 
+def _distribution_data_file(distribution_dir: Path, groupby_key: str) -> Path:
+    return distribution_data_path(_distribution_plot_path(distribution_dir, groupby_key))
+
+
 def _parse_run(run_path: Path) -> BenchOutcome:
     payload = json.loads(run_path.read_text())
     status = payload["status"]
@@ -93,22 +104,44 @@ def _collect_outcomes(experiment_dir: Path) -> dict[tuple[str, str], BenchOutcom
     return outcomes
 
 
-def _plot_distribution_panel(ax, image_path: Path, title: str) -> None:
+def _lookup_outcome(outcomes: dict[tuple[str, str], BenchOutcome], groupby_key: str, mode: str) -> BenchOutcome | None:
+    outcome = outcomes.get((groupby_key, mode))
+    if outcome is not None:
+        return outcome
+    if mode not in GLOBAL_MODES:
+        return None
+    matches = [candidate for candidate in outcomes.values() if candidate.mode == mode]
+    if not matches:
+        return None
+    return sorted(matches, key=lambda candidate: (candidate.groupby_key, candidate.run_path.name))[0]
+
+
+def _plot_distribution_panel(fig, host_ax, distribution_dir: Path, groupby_key: str) -> None:
+    data_path = _distribution_data_file(distribution_dir, groupby_key)
+    if data_path.exists():
+        nested = host_ax.get_subplotspec().subgridspec(1, 2, wspace=0.22)
+        host_ax.remove()
+        dist_axes = np.array([fig.add_subplot(nested[0, 0]), fig.add_subplot(nested[0, 1])], dtype=object)
+        payload = load_distribution_payload(data_path)
+        plot_category_distribution_axes(dist_axes, payload)
+        return
+
+    image_path = _distribution_plot_path(distribution_dir, groupby_key)
     if not image_path.exists():
-        ax.text(0.5, 0.5, f"missing plot\n{image_path.name}", ha="center", va="center", fontsize=10, color="#7c2d12")
-        ax.set_facecolor("#ffedd5")
-        ax.set_xticks([])
-        ax.set_yticks([])
-        for spine in ax.spines.values():
+        host_ax.text(0.5, 0.5, f"missing plot\n{image_path.name}", ha="center", va="center", fontsize=10, color="#7c2d12")
+        host_ax.set_facecolor("#ffedd5")
+        host_ax.set_xticks([])
+        host_ax.set_yticks([])
+        for spine in host_ax.spines.values():
             spine.set_visible(False)
         return
 
     image = plt.imread(image_path)
-    ax.imshow(image)
-    ax.set_title(title, loc="left", fontsize=11, fontweight="bold")
-    ax.set_xticks([])
-    ax.set_yticks([])
-    for spine in ax.spines.values():
+    host_ax.imshow(image)
+    host_ax.set_title(groupby_key, loc="left", fontsize=11, fontweight="bold")
+    host_ax.set_xticks([])
+    host_ax.set_yticks([])
+    for spine in host_ax.spines.values():
         spine.set_visible(False)
 
 
@@ -122,12 +155,26 @@ def _plot_mode_panel(ax, outcome: BenchOutcome | None, mode: str, max_samples: i
         return
 
     if outcome.status != "ok" or outcome.samples_per_sec is None or not outcome.trace:
-        ax.text(0.5, 0.62, "FAILED", ha="center", va="center", fontsize=12, fontweight="bold", color="#b91c1c")
         reason = (outcome.reason or "unknown error").replace("Observation range", "range")
-        if len(reason) > 90:
-            reason = reason[:87] + "..."
-        ax.text(0.5, 0.36, reason, ha="center", va="center", fontsize=8, color="#7f1d1d", wrap=True)
-        ax.text(0.5, 0.10, outcome.run_path.name, ha="center", va="center", fontsize=7, color="#7f1d1d")
+        reason = textwrap.fill(reason, width=30)
+        run_name = textwrap.shorten(outcome.run_path.name, width=34, placeholder="...")
+        panel_text = f"FAILED\n\n{reason}\n\n{run_name}"
+        ax.text(
+            0.5,
+            0.5,
+            panel_text,
+            ha="center",
+            va="center",
+            fontsize=8.5,
+            color="#7f1d1d",
+            linespacing=1.45,
+            bbox={
+                "boxstyle": "round,pad=0.55",
+                "facecolor": "#fff7f7",
+                "edgecolor": "#fca5a5",
+                "linewidth": 1.2,
+            },
+        )
         ax.set_facecolor("#fee2e2")
         ax.set_xticks([])
         ax.set_yticks([])
@@ -185,17 +232,17 @@ def main(experiment_root: Path, experiment: str | None, distribution_dir: Path, 
 
     fig, axes = plt.subplots(
         nrows=len(keys),
-        ncols=3,
-        figsize=(16, max(3.0 * len(keys), 10)),
-        gridspec_kw={"width_ratios": [2.6, 1.5, 1.5]},
+        ncols=1 + len(DEFAULT_MODES),
+        figsize=(16 + 3 * max(len(DEFAULT_MODES) - 2, 0), max(3.0 * len(keys), 10)),
+        gridspec_kw={"width_ratios": [2.6] + [1.5] * len(DEFAULT_MODES)},
     )
     if len(keys) == 1:
         axes = np.array([axes])
 
     for row_idx, key in enumerate(keys):
-        _plot_distribution_panel(axes[row_idx, 0], _distribution_plot_path(distribution_dir, key), key)
+        _plot_distribution_panel(fig, axes[row_idx, 0], distribution_dir, key)
         for col_idx, mode in enumerate(DEFAULT_MODES, start=1):
-            _plot_mode_panel(axes[row_idx, col_idx], outcomes.get((key, mode)), mode, max_samples, max_sps)
+            _plot_mode_panel(axes[row_idx, col_idx], _lookup_outcome(outcomes, key, mode), mode, max_samples, max_sps)
 
     fig.suptitle(f"Distributions and Benchmark Throughput: {experiment_dir.name}", fontsize=16, fontweight="bold")
     fig.tight_layout(rect=[0, 0, 1, 0.98])

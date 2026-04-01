@@ -136,22 +136,24 @@ def _default_real_plot_keys(src_path: Path, name: str, label: str | None) -> lis
 def _maybe_clean_plots(plots_dir: Path, *, yes: bool) -> None:
     """Prompt to clean existing plot files before writing new ones."""
     existing = sorted(plots_dir.glob("dist_*.png"))
-    if not existing:
+    existing_json = sorted(plots_dir.glob("dist_*.json"))
+    existing_all = existing + existing_json
+    if not existing_all:
         return
 
     if yes:
         return
 
     should_clean = click.confirm(
-        f"Clean {len(existing)} existing plot(s) in {plots_dir} before generating new ones?",
+        f"Clean {len(existing_all)} existing plot file(s) in {plots_dir} before generating new ones?",
         default=True,
     )
     if not should_clean:
         return
 
-    for path in existing:
+    for path in existing_all:
         path.unlink()
-    print(f"  Removed {len(existing)} existing plot(s) from {plots_dir}")
+    print(f"  Removed {len(existing_all)} existing plot file(s) from {plots_dir}")
 
 
 def _print_profile_plan(
