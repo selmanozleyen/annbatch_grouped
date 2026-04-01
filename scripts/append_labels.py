@@ -249,8 +249,8 @@ def _print_plan_preview(plan: list[PlanEntry]) -> None:
     print("\nPreview:")
     for entry in plan:
         print(
-            f"  {entry.column_name:<24} categories={len(entry.categories):>8,} "
-            f"min={int(entry.counts.min()):>8,} max={int(entry.counts.max()):>12,}"
+            f"  {entry.column_name:<24} categories={len(entry.categories):,} "
+            f"min={int(entry.counts.min()):,} max={int(entry.counts.max()):,}"
         )
         for row in _preview_rows(entry.categories, entry.counts, entry.preview_labels):
             print(row)
@@ -295,8 +295,8 @@ def main(src: Path | None, yes: bool) -> None:
     print("\nWriting columns...")
     for entry in plan:
         print(
-            f"  {entry.column_name:<24} categories={len(entry.categories):>8,} "
-            f"min={int(entry.counts.min()):>8,} max={int(entry.counts.max()):>12,}"
+            f"  {entry.column_name:<24} categories={len(entry.categories):,} "
+            f"min={int(entry.counts.min()):,} max={int(entry.counts.max()):,}"
         )
         _write_categorical_column(obs_group, entry.column_name, entry.categories, entry.counts)
 
