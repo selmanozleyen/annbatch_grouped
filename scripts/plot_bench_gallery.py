@@ -28,7 +28,7 @@ from annbatch_grouped.plotting import (
 
 sns.set_theme(style="whitegrid", context="notebook")
 
-DEFAULT_MODES = ("random", "categorical", "scdataset")
+DEFAULT_MODES = ("random", "categorical")
 GLOBAL_MODES = {"random"}
 
 
@@ -61,7 +61,11 @@ def _resolve_experiment_dir(experiment_root: Path, experiment: str | None) -> Pa
     candidates = sorted(path for path in experiment_root.iterdir() if path.is_dir())
     if not candidates:
         raise click.ClickException(f"No experiments found in {experiment_root}")
-    return candidates[-1]
+    for candidate in reversed(candidates):
+        runs_dir = candidate / "runs"
+        if runs_dir.exists() and next(runs_dir.glob("*.json"), None) is not None:
+            return candidate
+    raise click.ClickException(f"No completed experiments with run data found in {experiment_root}")
 
 
 def _distribution_plot_path(distribution_dir: Path, groupby_key: str) -> Path:

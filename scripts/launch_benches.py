@@ -14,6 +14,8 @@ from annbatch_grouped.default_profile_lists import (
     DEFAULT_PREVIEW_APPEND_PROFILES,
 )
 
+DEFAULT_CPU_CONSTRAINT = "intel_xeon_6248r"
+DEFAULT_WARMUP = 5
 DEFAULT_MODES = ("random", "categorical")
 GROUPBY_MODES = ("categorical", "scdataset")
 
@@ -28,13 +30,34 @@ def _default_groupby_keys() -> list[str]:
 @click.option("--dry-run", is_flag=True, default=False, help="Print sbatch commands without submitting them.")
 @click.option("--experiment", type=str, default=None, help="Shared experiment name for all submitted jobs.")
 @click.option(
+    "--constraint",
+    "cpu_constraint",
+    type=str,
+    default=DEFAULT_CPU_CONSTRAINT,
+    show_default=True,
+    help="Slurm CPU constraint passed to sbatch.",
+)
+@click.option(
+    "--warmup",
+    type=int,
+    default=DEFAULT_WARMUP,
+    show_default=True,
+    help="Warmup batches forwarded to bench.sbatch.",
+)
+@click.option(
     "--mode",
     "modes",
     type=click.Choice(DEFAULT_MODES),
     multiple=True,
     help="Modes to submit. Repeat to select multiple. Default: all.",
 )
-def main(dry_run: bool, experiment: str | None, modes: tuple[str, ...]) -> None:
+def main(
+    dry_run: bool,
+    experiment: str | None,
+    cpu_constraint: str,
+    warmup: int,
+    modes: tuple[str, ...],
+) -> None:
     bench_sbatch = Path(__file__).resolve().with_name("bench.sbatch")
     groupby_keys = _default_groupby_keys()
     if experiment is None:
@@ -47,22 +70,35 @@ def main(dry_run: bool, experiment: str | None, modes: tuple[str, ...]) -> None:
     print("=" * 72)
     print(f"  sbatch script:  {bench_sbatch}")
     print(f"  experiment:     {experiment}")
+    print(f"  constraint:     {cpu_constraint}")
+    print(f"  warmup:         {warmup}")
     print(f"  groupby keys:   {', '.join(groupby_keys)}")
     print(f"  modes:          {', '.join(modes)}")
     selected_groupby_modes = tuple(mode for mode in modes if mode in GROUPBY_MODES)
     total_jobs = (1 if "random" in modes else 0) + len(groupby_keys) * len(selected_groupby_modes)
     print(f"  total jobs:     {total_jobs}")
 
+    def build_command(mode: str, groupby_key: str) -> list[str]:
+        return [
+            "sbatch",
+            f"--constraint={cpu_constraint}",
+            str(bench_sbatch),
+            mode,
+            groupby_key,
+            experiment,
+            str(warmup),
+        ]
+
     if "random" in modes:
         random_groupby_key = groupby_keys[0]
-        command = ["sbatch", str(bench_sbatch), "random", random_groupby_key, experiment]
+        command = build_command("random", random_groupby_key)
         print(f"\n$ {shlex.join(command)}")
         if not dry_run:
             subprocess.run(command, check=True)
 
     for groupby_key in groupby_keys:
         for mode in selected_groupby_modes:
-            command = ["sbatch", str(bench_sbatch), mode, groupby_key, experiment]
+            command = build_command(mode, groupby_key)
             print(f"\n$ {shlex.join(command)}")
             if not dry_run:
                 subprocess.run(command, check=True)

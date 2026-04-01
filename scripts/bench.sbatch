@@ -18,6 +18,7 @@ source .venv/bin/activate
 MODE="${1:-categorical}"
 GROUPBY_KEY="${2:-cell_line_sorted}"
 EXPERIMENT="${3:-manual}"
+WARMUP="${4:-5}"
 
 echo "=== Job info ==="
 echo "Job ID:    $SLURM_JOB_ID"
@@ -28,6 +29,7 @@ echo "CPUs:      $SLURM_CPUS_PER_TASK"
 echo "Mode:      $MODE"
 echo "Groupby:   $GROUPBY_KEY"
 echo "Experiment: $EXPERIMENT"
+echo "Warmup:    $WARMUP"
 echo ""
 
 CMD=(python -u scripts/bench.py
@@ -38,6 +40,7 @@ CMD=(python -u scripts/bench.py
     --chunk_size 64
     --preload_nchunks 64
     --n_batches 500
+    --warmup "$WARMUP"
 )
 
 "${CMD[@]}"
