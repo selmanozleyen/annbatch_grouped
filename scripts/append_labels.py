@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import click
@@ -15,6 +15,14 @@ from annbatch_grouped.default_profile_lists import (
     DEFAULT_PREVIEW_APPEND_PROFILES,
 )
 from annbatch_grouped.paths import TAHOE_ZARR
+
+
+@dataclass(frozen=True)
+class PlanEntry:
+    column_name: str
+    categories: np.ndarray
+    counts: np.ndarray
+    preview_labels: np.ndarray
 
 
 def _string_dtype() -> np.dtype:
@@ -134,56 +142,117 @@ def _combined_counts(obs_group, left: str, right: str) -> tuple[np.ndarray, np.n
     combined = left_inverse[left_codes[valid]] * len(right_categories) + right_inverse[right_codes[valid]]
     counts = np.bincount(combined, minlength=len(left_categories) * len(right_categories))
     nonzero = np.flatnonzero(counts)
-    categories = _prefixed_categories("cell_line__drug_sorted", len(nonzero))
+    categories = _prefixed_categories("cell_line-drug_sorted", len(nonzero))
     return categories, counts[nonzero]
+
+
+def _combined_preview_labels(obs_group, left: str, right: str) -> np.ndarray:
+    left_group = obs_group[left]
+    right_group = obs_group[right]
+
+    left_categories = np.asarray(left_group["categories"][:], dtype=_string_dtype())
+    right_categories = np.asarray(right_group["categories"][:], dtype=_string_dtype())
+    left_codes = np.asarray(left_group["codes"][:], dtype=np.int64)
+    right_codes = np.asarray(right_group["codes"][:], dtype=np.int64)
+
+    left_order = _string_sort_order(left_categories)
+    right_order = _string_sort_order(right_categories)
+    left_sorted = left_categories[left_order]
+    right_sorted = right_categories[right_order]
+
+    left_inverse = np.empty(len(left_categories), dtype=np.int64)
+    right_inverse = np.empty(len(right_categories), dtype=np.int64)
+    left_inverse[left_order] = np.arange(len(left_order), dtype=np.int64)
+    right_inverse[right_order] = np.arange(len(right_order), dtype=np.int64)
+
+    valid = (left_codes >= 0) & (right_codes >= 0)
+    combined = left_inverse[left_codes[valid]] * len(right_categories) + right_inverse[right_codes[valid]]
+    counts = np.bincount(combined, minlength=len(left_categories) * len(right_categories))
+    nonzero = np.flatnonzero(counts)
+
+    labels = [
+        f"{str(left_sorted[idx // len(right_categories)])} | {str(right_sorted[idx % len(right_categories)])}"
+        for idx in nonzero
+    ]
+    return np.asarray(labels, dtype=_string_dtype())
 
 
 def _synthetic_profiles(n_obs: int):
     return [replace(profile, n_obs=n_obs) for profile in DEFAULT_PREVIEW_APPEND_PROFILES]
 
 
-def _synthetic_plan(n_obs: int) -> list[tuple[str, np.ndarray, np.ndarray]]:
-    plan: list[tuple[str, np.ndarray, np.ndarray]] = []
+def _synthetic_plan(n_obs: int) -> list[PlanEntry]:
+    plan: list[PlanEntry] = []
     for profile in _synthetic_profiles(n_obs):
         counts = make_category_counts(profile)
         categories = _prefixed_categories(profile.name, profile.n_categories)
-        plan.append((profile.name, categories, counts))
+        plan.append(
+            PlanEntry(
+                column_name=profile.name,
+                categories=categories,
+                counts=counts,
+                preview_labels=categories,
+            )
+        )
     return plan
 
 
-def _real_plan(obs_group) -> list[tuple[str, np.ndarray, np.ndarray]]:
-    plan: list[tuple[str, np.ndarray, np.ndarray]] = []
+def _real_plan(obs_group) -> list[PlanEntry]:
+    plan: list[PlanEntry] = []
     for spec in DEFAULT_APPEND_REAL_COLUMNS:
         if spec.source == "cell_line":
             categories, counts = _categorical_counts(obs_group, "cell_line")
+            preview_labels = categories
         elif spec.source == "drug":
-            _, counts = _categorical_counts(obs_group, "drug")
+            preview_labels, counts = _categorical_counts(obs_group, "drug")
             categories = _prefixed_categories(spec.name, len(counts))
         elif spec.source == ("cell_line", "drug"):
+            preview_labels = _combined_preview_labels(obs_group, "cell_line", "drug")
             categories, counts = _combined_counts(obs_group, "cell_line", "drug")
         else:
             raise ValueError(f"Unsupported real column source: {spec.source!r}")
-        plan.append((spec.name, categories, counts))
+        plan.append(
+            PlanEntry(
+                column_name=spec.name,
+                categories=categories,
+                counts=counts,
+                preview_labels=preview_labels,
+            )
+        )
     return plan
 
 
-def _preview_rows(categories: np.ndarray, counts: np.ndarray, *, limit: int = 5) -> list[str]:
+def _preview_rows(
+    categories: np.ndarray,
+    counts: np.ndarray,
+    preview_labels: np.ndarray,
+    *,
+    limit: int = 5,
+) -> list[str]:
     rows: list[str] = []
-    for category, count in zip(categories[:limit], counts[:limit], strict=False):
-        rows.append(f"      {str(category)}: {int(count):,}")
+    for category, count, preview_label in zip(
+        categories[:limit],
+        counts[:limit],
+        preview_labels[:limit],
+        strict=False,
+    ):
+        if str(category) == str(preview_label):
+            rows.append(f"      {str(category)}: {int(count):,}")
+        else:
+            rows.append(f"      {str(category)} <- {str(preview_label)}: {int(count):,}")
     if len(categories) > limit:
         rows.append(f"      ... and {len(categories) - limit:,} more")
     return rows
 
 
-def _print_plan_preview(plan: list[tuple[str, np.ndarray, np.ndarray]]) -> None:
+def _print_plan_preview(plan: list[PlanEntry]) -> None:
     print("\nPreview:")
-    for column_name, categories, counts in plan:
+    for entry in plan:
         print(
-            f"  {column_name:<24} categories={len(categories):>8,} "
-            f"min={int(counts.min()):>8,} max={int(counts.max()):>12,}"
+            f"  {entry.column_name:<24} categories={len(entry.categories):>8,} "
+            f"min={int(entry.counts.min()):>8,} max={int(entry.counts.max()):>12,}"
         )
-        for row in _preview_rows(categories, counts):
+        for row in _preview_rows(entry.categories, entry.counts, entry.preview_labels):
             print(row)
 
 
@@ -205,7 +274,7 @@ def main(src: Path | None, yes: bool) -> None:
     obs_group = store["obs"]
 
     plan = _real_plan(obs_group) + _synthetic_plan(n_obs)
-    target_columns = [column_name for column_name, _, _ in plan]
+    target_columns = [entry.column_name for entry in plan]
     existing = [column for column in target_columns if column in obs_group]
 
     print("=" * 72)
@@ -224,12 +293,12 @@ def main(src: Path | None, yes: bool) -> None:
         raise SystemExit(0)
 
     print("\nWriting columns...")
-    for column_name, categories, counts in plan:
+    for entry in plan:
         print(
-            f"  {column_name:<24} categories={len(categories):>8,} "
-            f"min={int(counts.min()):>8,} max={int(counts.max()):>12,}"
+            f"  {entry.column_name:<24} categories={len(entry.categories):>8,} "
+            f"min={int(entry.counts.min()):>8,} max={int(entry.counts.max()):>12,}"
         )
-        _write_categorical_column(obs_group, column_name, categories, counts)
+        _write_categorical_column(obs_group, entry.column_name, entry.categories, entry.counts)
 
     _update_column_order(obs_group, target_columns)
 

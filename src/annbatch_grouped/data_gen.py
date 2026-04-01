@@ -141,7 +141,7 @@ MANY_CATEGORIES_UNIFORM = _profile(
 )
 
 ZIPF_1K = _profile(
-    "zipf_1k",
+    "zipf_1k_cats",
     n_categories=1_000,
     distribution="zipf",
     zipf_exponent=1.5,
@@ -154,7 +154,7 @@ UNIFORM_1K = _profile(
 )
 
 UNIFORM_10K = _profile(
-    "uniform_10k",
+    "uniform_10k_cats",
     n_categories=10_000,
     distribution="uniform",
 )
@@ -167,7 +167,7 @@ ZIPF_100K = _profile(
 )
 
 UNIFORM_100K = _profile(
-    "uniform_100k",
+    "uniform_100k_cats",
     n_categories=100_000,
     distribution="uniform",
 )
@@ -180,13 +180,13 @@ ZIPF_REALISTIC = _profile(
 )
 
 MANY_CATEGORIES_LINEAR = _profile(
-    "many_categories_linear",
+    "linear_1k_cats",
     n_categories=1_000,
     distribution="linear",
 )
 
 MANY_CATEGORIES_EXPONENTIAL = _profile(
-    "many_categories_exponential",
+    "exponential_1k_cats",
     n_categories=1_000,
     distribution="geometric",
     geometric_ratio=0.99,
