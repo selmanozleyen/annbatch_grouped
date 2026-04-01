@@ -37,6 +37,11 @@ def _prefixed_categories(prefix: str, n_categories: int) -> np.ndarray:
     return np.asarray(values, dtype=_string_dtype())
 
 
+def _string_sort_order(values: np.ndarray) -> np.ndarray:
+    normalized = np.asarray(values.tolist(), dtype=object)
+    return np.argsort(normalized)
+
+
 def _write_contiguous_codes(codes_array, counts: np.ndarray, *, dtype: np.dtype) -> None:
     chunk_len = int(codes_array.chunks[0]) if codes_array.chunks else 1_000_000
     pos = 0
@@ -105,7 +110,7 @@ def _categorical_counts(obs_group, column: str) -> tuple[np.ndarray, np.ndarray]
     used = counts > 0
     categories = categories[used]
     counts = counts[used]
-    order = np.argsort(categories.astype(str))
+    order = _string_sort_order(categories)
     return categories[order], counts[order]
 
 
@@ -118,8 +123,8 @@ def _combined_counts(obs_group, left: str, right: str) -> tuple[np.ndarray, np.n
     left_codes = np.asarray(left_group["codes"][:], dtype=np.int64)
     right_codes = np.asarray(right_group["codes"][:], dtype=np.int64)
 
-    left_order = np.argsort(left_categories.astype(str))
-    right_order = np.argsort(right_categories.astype(str))
+    left_order = _string_sort_order(left_categories)
+    right_order = _string_sort_order(right_categories)
     left_inverse = np.empty(len(left_categories), dtype=np.int64)
     right_inverse = np.empty(len(right_categories), dtype=np.int64)
     left_inverse[left_order] = np.arange(len(left_order), dtype=np.int64)
