@@ -30,6 +30,16 @@ sns.set_theme(style="whitegrid", context="notebook")
 
 DEFAULT_MODES = ("random", "categorical")
 GLOBAL_MODES = {"random"}
+AGGREGATION_GRID_POINTS = 160
+
+
+@dataclass(frozen=True)
+class RepeatRun:
+    repeat_index: int
+    samples_per_sec: float | None
+    total_time_s: float | None
+    trace: list[tuple[float, float]]
+    run_path: Path
 
 
 @dataclass(frozen=True)
@@ -47,6 +57,7 @@ class BenchOutcome:
     successful_repeats: int
     requested_repeats: int
     failed_repeats: int
+    repeat_runs: list[RepeatRun]
 
 
 def _groupby_keys() -> list[str]:
@@ -92,6 +103,45 @@ def _parse_run(run_path: Path) -> BenchOutcome:
         )
         for point in payload.get("throughput_trace", [])
     ]
+    repeats_payload = payload.get("repeats")
+    repeat_runs: list[RepeatRun] = []
+    if isinstance(repeats_payload, list) and repeats_payload:
+        for repeat in repeats_payload:
+            repeat_metrics = repeat.get("metrics", {})
+            repeat_trace = [
+                (
+                    float(point.get("elapsed_s", point["samples_seen"] / point["samples_per_sec"])),
+                    float(point.get("batch_samples_per_sec", point["samples_per_sec"])),
+                )
+                for point in repeat.get("throughput_trace", [])
+            ]
+            repeat_runs.append(
+                RepeatRun(
+                    repeat_index=int(repeat.get("repeat_index", len(repeat_runs) + 1)),
+                    samples_per_sec=(
+                        float(repeat_metrics["samples_per_sec"])
+                        if "samples_per_sec" in repeat_metrics
+                        else None
+                    ),
+                    total_time_s=(
+                        float(repeat_metrics["total_time_s"])
+                        if "total_time_s" in repeat_metrics
+                        else None
+                    ),
+                    trace=repeat_trace,
+                    run_path=run_path,
+                )
+            )
+    elif trace:
+        repeat_runs.append(
+            RepeatRun(
+                repeat_index=int(payload.get("repeat_index", 1)),
+                samples_per_sec=float(metrics["samples_per_sec"]) if "samples_per_sec" in metrics else None,
+                total_time_s=float(metrics["total_time_s"]) if "total_time_s" in metrics else None,
+                trace=trace,
+                run_path=run_path,
+            )
+        )
     successful_repeats = int(
         repeat_summary.get(
             "successful_repeats",
@@ -114,32 +164,41 @@ def _parse_run(run_path: Path) -> BenchOutcome:
         successful_repeats=successful_repeats,
         requested_repeats=requested_repeats,
         failed_repeats=failed_repeats,
+        repeat_runs=repeat_runs,
     )
 
 
-def _aggregate_trace(outcomes: list[BenchOutcome]) -> list[tuple[float, float]]:
-    trace_outcomes = [outcome for outcome in outcomes if outcome.trace and outcome.successful_repeats > 0]
-    if not trace_outcomes:
+def _aggregate_trace(repeat_runs: list[RepeatRun]) -> list[tuple[float, float]]:
+    trace_runs = [repeat_run for repeat_run in repeat_runs if repeat_run.trace]
+    if not trace_runs:
         return []
-    if len(trace_outcomes) == 1:
-        return trace_outcomes[0].trace
+    if len(trace_runs) == 1:
+        return trace_runs[0].trace
 
-    min_len = min(len(outcome.trace) for outcome in trace_outcomes)
-    if min_len == 0:
+    max_elapsed = max(repeat_run.trace[-1][0] for repeat_run in trace_runs)
+    if max_elapsed <= 0:
         return []
 
-    x_histories = np.asarray(
-        [[point[0] for point in outcome.trace[:min_len]] for outcome in trace_outcomes],
-        dtype=np.float64,
-    )
-    y_histories = np.asarray(
-        [[point[1] for point in outcome.trace[:min_len]] for outcome in trace_outcomes],
-        dtype=np.float64,
-    )
-    weights = np.asarray([outcome.successful_repeats for outcome in trace_outcomes], dtype=np.float64)
-    x = np.average(x_histories, axis=0, weights=weights)
-    y = np.average(y_histories, axis=0, weights=weights)
-    return [(float(xi), float(yi)) for xi, yi in zip(x, y, strict=True)]
+    grid = np.linspace(0.0, float(max_elapsed), AGGREGATION_GRID_POINTS, dtype=np.float64)
+    summed = np.zeros_like(grid)
+    counts = np.zeros_like(grid, dtype=np.int64)
+    for repeat_run in trace_runs:
+        x = np.asarray([point[0] for point in repeat_run.trace], dtype=np.float64)
+        y = np.asarray([point[1] for point in repeat_run.trace], dtype=np.float64)
+        if x.size == 0:
+            continue
+        valid = grid <= x[-1]
+        if not np.any(valid):
+            continue
+        interpolated = np.interp(grid[valid], x, y)
+        summed[valid] += interpolated
+        counts[valid] += 1
+
+    valid = counts > 0
+    if not np.any(valid):
+        return []
+    mean_y = summed[valid] / counts[valid]
+    return [(float(xi), float(yi)) for xi, yi in zip(grid[valid], mean_y, strict=True)]
 
 
 def _aggregate_outcome_group(outcomes: list[BenchOutcome]) -> BenchOutcome:
@@ -147,6 +206,12 @@ def _aggregate_outcome_group(outcomes: list[BenchOutcome]) -> BenchOutcome:
         return outcomes[0]
 
     successful = [outcome for outcome in outcomes if outcome.successful_repeats > 0 and outcome.samples_per_sec is not None]
+    repeat_runs = [
+        repeat_run
+        for outcome in outcomes
+        for repeat_run in outcome.repeat_runs
+        if repeat_run.trace and repeat_run.samples_per_sec is not None
+    ]
     successful_repeats = sum(outcome.successful_repeats for outcome in outcomes)
     failed_repeats = sum(outcome.failed_repeats for outcome in outcomes)
     requested_repeats = max(
@@ -184,12 +249,24 @@ def _aggregate_outcome_group(outcomes: list[BenchOutcome]) -> BenchOutcome:
         samples_per_sec=samples_per_sec,
         total_time_s=total_time_s,
         reason=reason,
-        trace=_aggregate_trace(outcomes),
+        trace=_aggregate_trace(repeat_runs),
         run_path=sorted(outcomes, key=lambda outcome: outcome.run_path.name)[0].run_path,
         successful_repeats=successful_repeats,
         requested_repeats=requested_repeats,
         failed_repeats=failed_repeats,
+        repeat_runs=sorted(repeat_runs, key=lambda repeat_run: repeat_run.repeat_index),
     )
+
+
+def _repeat_summary_text(outcome: BenchOutcome) -> str:
+    lines: list[str] = []
+    for repeat_run in outcome.repeat_runs:
+        if repeat_run.samples_per_sec is None:
+            continue
+        lines.append(f"r{repeat_run.repeat_index}: {repeat_run.samples_per_sec:,.0f}")
+    if outcome.samples_per_sec is not None:
+        lines.append(f"mean: {outcome.samples_per_sec:,.0f}")
+    return "\n".join(lines)
 
 
 def _collect_outcomes(experiment_dir: Path) -> dict[tuple[str, str], BenchOutcome]:
@@ -284,10 +361,23 @@ def _plot_mode_panel(ax, outcome: BenchOutcome | None, mode: str, max_elapsed_s:
             spine.set_visible(False)
         return
 
+    repeat_palette = sns.color_palette("husl", max(len(outcome.repeat_runs), 1))
+    for idx, repeat_run in enumerate(outcome.repeat_runs):
+        if not repeat_run.trace:
+            continue
+        rx = np.asarray([point[0] for point in repeat_run.trace], dtype=np.float64)
+        ry = np.asarray([point[1] for point in repeat_run.trace], dtype=np.float64)
+        ax.plot(
+            rx,
+            ry,
+            color=repeat_palette[idx % len(repeat_palette)],
+            linewidth=1.2,
+            alpha=0.75,
+            label=f"r{repeat_run.repeat_index}",
+        )
     x = np.asarray([point[0] for point in outcome.trace], dtype=np.float64)
     y = np.asarray([point[1] for point in outcome.trace], dtype=np.float64)
-    ax.plot(x, y, color="#0f766e", linewidth=2)
-    ax.fill_between(x, y, color="#99f6e4", alpha=0.3)
+    ax.plot(x, y, color="#0f172a", linewidth=2.4, label="mean")
     ax.set_xlim(0, max(max_elapsed_s, float(x[-1])) * 1.02)
     ax.set_ylim(0, max(max_sps, float(y.max())) * 1.08 if max_sps > 0 else float(y.max()) * 1.08)
     ax.set_xlabel("elapsed seconds")
@@ -299,6 +389,7 @@ def _plot_mode_panel(ax, outcome: BenchOutcome | None, mode: str, max_elapsed_s:
             f"{outcome.samples_per_sec:,.0f} samples/s\n"
             f"{outcome.total_time_s:.1f}s total\n"
             f"repeats {outcome.successful_repeats}/{outcome.requested_repeats}"
+            f"\nagg time-grid mean"
             + (
                 f"\ncpu {textwrap.shorten(outcome.cpu_constraint, width=22, placeholder='...')}"
                 if outcome.cpu_constraint
@@ -311,6 +402,27 @@ def _plot_mode_panel(ax, outcome: BenchOutcome | None, mode: str, max_elapsed_s:
         fontsize=8,
         bbox={"boxstyle": "round,pad=0.3", "facecolor": "white", "edgecolor": "#cbd5e1"},
     )
+    repeat_summary = _repeat_summary_text(outcome)
+    if repeat_summary:
+        ax.text(
+            0.02,
+            0.05,
+            repeat_summary,
+            transform=ax.transAxes,
+            ha="left",
+            va="bottom",
+            fontsize=7.5,
+            family="monospace",
+            bbox={"boxstyle": "round,pad=0.25", "facecolor": "white", "edgecolor": "#cbd5e1"},
+        )
+    if outcome.repeat_runs:
+        ax.legend(
+            loc="upper center",
+            bbox_to_anchor=(0.5, -0.24),
+            ncol=min(len(outcome.repeat_runs) + 1, 4),
+            fontsize=7,
+            frameon=False,
+        )
     if outcome.failed_repeats:
         ax.text(
             0.02,
@@ -354,14 +466,30 @@ def main(experiment_root: Path, experiment: str | None, distribution_dir: Path, 
         for outcome in outcomes.values()
         if outcome.status in {"ok", "partial"} and outcome.trace
     ]
-    max_elapsed_s = max((point[0] for outcome in ok_outcomes for point in outcome.trace), default=1.0)
-    max_sps = max((point[1] for outcome in ok_outcomes for point in outcome.trace), default=1.0)
+    max_elapsed_s = max(
+        (
+            point[0]
+            for outcome in ok_outcomes
+            for repeat_run in outcome.repeat_runs
+            for point in repeat_run.trace
+        ),
+        default=1.0,
+    )
+    max_sps = max(
+        (
+            point[1]
+            for outcome in ok_outcomes
+            for repeat_run in outcome.repeat_runs
+            for point in repeat_run.trace
+        ),
+        default=1.0,
+    )
     cpu_constraints = sorted({outcome.cpu_constraint for outcome in outcomes.values() if outcome.cpu_constraint})
 
     fig, axes = plt.subplots(
         nrows=len(keys),
         ncols=1 + len(DEFAULT_MODES),
-        figsize=(16 + 3 * max(len(DEFAULT_MODES) - 2, 0), max(3.0 * len(keys), 10)),
+        figsize=(16 + 3 * max(len(DEFAULT_MODES) - 2, 0), max(3.35 * len(keys), 11)),
         gridspec_kw={"width_ratios": [2.6] + [1.5] * len(DEFAULT_MODES)},
     )
     if len(keys) == 1:
@@ -376,7 +504,7 @@ def main(experiment_root: Path, experiment: str | None, distribution_dir: Path, 
     if cpu_constraints:
         title += f" | CPU constraint: {', '.join(cpu_constraints)}"
     fig.suptitle(title, fontsize=16, fontweight="bold")
-    fig.tight_layout(rect=[0, 0, 1, 0.98])
+    fig.tight_layout(rect=[0, 0.02, 1, 0.98], h_pad=2.0)
     output.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output, dpi=170, bbox_inches="tight")
     plt.close(fig)
