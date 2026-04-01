@@ -153,6 +153,12 @@ UNIFORM_1K = _profile(
     distribution="uniform",
 )
 
+UNIFORM_10K = _profile(
+    "uniform_10k",
+    n_categories=10_000,
+    distribution="uniform",
+)
+
 ZIPF_100K = _profile(
     "zipf_100k",
     n_categories=100_000,
@@ -207,6 +213,7 @@ ALL_PROFILES: list[CategoryProfile] = [
     MANY_CATEGORIES_UNIFORM,
     ZIPF_1K,
     UNIFORM_1K,
+    UNIFORM_10K,
     ZIPF_100K,
     UNIFORM_100K,
     ZIPF_REALISTIC,

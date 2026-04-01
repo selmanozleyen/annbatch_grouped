@@ -35,6 +35,11 @@ from annbatch_grouped.data_gen import (
     read_obs_value_counts_lazy,
     read_shape_lazy,
 )
+from annbatch_grouped.default_profile_lists import (
+    DEFAULT_APPEND_REAL_COLUMNS,
+    DEFAULT_PREVIEW_APPEND_PROFILES,
+    ObsColumnPlan,
+)
 from annbatch_grouped.paths import RESULTS_DIR, TAHOE_ZARR
 from annbatch_grouped.plotting import plot_category_distribution
 
@@ -139,7 +144,7 @@ def _maybe_clean_plots(plots_dir: Path, *, yes: bool) -> None:
 
     should_clean = click.confirm(
         f"Clean {len(existing)} existing plot(s) in {plots_dir} before generating new ones?",
-        default=False,
+        default=True,
     )
     if not should_clean:
         return
@@ -202,6 +207,107 @@ def _preview_single_synthetic(profile: CategoryProfile, plots_dir: Path) -> None
         distribution_label=profile.distribution,
     )
     print(f"  Saved distribution plot: {plot_path}")
+
+
+def _sorted_value_counts(src_path: Path, column: str) -> pd.Series:
+    """Read one column lazily and return counts sorted by category value."""
+    values = read_obs_column_lazy(src_path, column).astype(str)
+    counts = values.value_counts(dropna=False)
+    return counts.sort_index()
+
+
+def _sorted_combined_value_counts(src_path: Path, columns: tuple[str, str]) -> pd.Series:
+    """Read two columns lazily and return counts sorted by combined label."""
+    left = read_obs_column_lazy(src_path, columns[0]).astype(str)
+    right = read_obs_column_lazy(src_path, columns[1]).astype(str)
+    labels = left + " | " + right
+    counts = labels.value_counts(dropna=False)
+    return counts.sort_index()
+
+
+def _generated_real_counts(src_path: Path, spec: ObsColumnPlan) -> pd.Series:
+    """Return real-data counts aligned with the append script."""
+    if isinstance(spec.source, tuple):
+        counts = _sorted_combined_value_counts(src_path, spec.source)
+    else:
+        counts = _sorted_value_counts(src_path, spec.source)
+
+    if spec.name == "cell_line_sorted":
+        return counts
+
+    width = max(1, len(str(len(counts) - 1)))
+    renamed = [f"{spec.name}_{i:0{width}d}" for i in range(len(counts))]
+    return pd.Series(counts.to_numpy(), index=renamed, name=spec.name)
+
+
+def _print_generated_real_plan(
+    src_path: Path,
+    specs: list[ObsColumnPlan],
+    output_base: Path,
+    plots_dir: Path,
+) -> None:
+    """Print a summary of the default Tahoe append-style previews."""
+    print(f"\n{'=' * 80}")
+    print("Real-data distribution preview plan")
+    print(f"{'=' * 80}")
+    print(f"  source:      {src_path}")
+    print(f"  output_dir:  {output_base}")
+    print(f"  plots_dir:   {plots_dir}")
+    print(f"  plot_keys:   {', '.join(spec.name for spec in specs)}")
+    n_obs, n_vars = read_shape_lazy(src_path)
+    print(f"  shape:       ({n_obs:,}, {n_vars:,})")
+    print("  obs access:  reading only requested grouping columns")
+    print()
+
+
+def _preview_generated_real_data(
+    src_path: Path,
+    specs: list[ObsColumnPlan],
+    plots_dir: Path,
+) -> None:
+    """Preview the default Tahoe append-style real columns."""
+    available = set(list_obs_columns(src_path))
+    required = sorted(
+        {
+            col
+            for spec in specs
+            for col in ([spec.source] if isinstance(spec.source, str) else list(spec.source))
+        }
+    )
+    missing = [key for key in required if key not in available]
+    if missing:
+        avail = ", ".join(sorted(available)[:20])
+        if len(available) > 20:
+            avail += ", ..."
+        click.echo(
+            f"Error: missing obs column(s): {', '.join(missing)}. Available: {avail}",
+            err=True,
+        )
+        raise SystemExit(1)
+
+    for spec in specs:
+        counts = _generated_real_counts(src_path, spec)
+        top_n = min(10, len(counts))
+        print(
+            f"  {spec.name}: n_categories={len(counts):,}  "
+            f"min={int(counts.min()):,}  max={int(counts.max()):,}  "
+            f"median={int(counts.median()):,}  "
+            f"imbalance={float(counts.max() / max(int(counts.min()), 1)):.1f}x"
+        )
+        print(f"    First {top_n}:")
+        for cat, count in counts.head(top_n).items():
+            print(f"      {cat}: {int(count):,}")
+        if len(counts) > top_n:
+            print(f"      ... and {len(counts) - top_n} more")
+
+        plot_path = plots_dir / f"dist_{spec.name}.png"
+        plot_category_distribution(
+            counts.to_numpy(),
+            spec.name,
+            plot_path,
+            distribution_label=f"real {spec.name}",
+        )
+        print(f"  Saved distribution plot: {plot_path}")
 
 
 def _print_real_data_plan(
@@ -299,7 +405,7 @@ def _preview_real_data(
     "--profile",
     type=str,
     default=None,
-    help=f"Plot only one synthetic profile. Default is all profiles. Available: {', '.join(PROFILE_MAP)}",
+    help=f"Plot only one synthetic profile. Default is the shared preview set. Available: {', '.join(PROFILE_MAP)}",
 )
 @click.option(
     "--store_dir",
@@ -365,7 +471,7 @@ def main(
             raise SystemExit(1)
         selected = [PROFILE_MAP[profile]]
     else:
-        selected = list(ALL_PROFILES)
+        selected = list(DEFAULT_PREVIEW_APPEND_PROFILES)
 
     resolved_n_obs, resolved_n_vars, shape_source = _resolve_preview_shape(n_obs, n_vars)
     if resolved_n_obs is not None:
@@ -387,7 +493,9 @@ def main(
         print(f"\n{'=' * 60}")
         print("Previewing real Tahoe distributions")
         print(f"{'=' * 60}")
-        _preview_real_data(tahoe_path, "tahoe-real", list(DEFAULT_TAHOE_LABEL_SPECS), plots_dir)
+        specs = list(DEFAULT_APPEND_REAL_COLUMNS)
+        _print_generated_real_plan(tahoe_path, specs, output_base, plots_dir)
+        _preview_generated_real_data(tahoe_path, specs, plots_dir)
 
     elapsed = time.perf_counter() - t_total
     print(f"\n{'=' * 80}")
