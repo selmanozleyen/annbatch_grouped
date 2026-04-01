@@ -5,11 +5,13 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from pathlib import Path
 
+import anndata as ad
 import click
 import numpy as np
+import pandas as pd
 import zarr
 
-from annbatch_grouped.data_gen import make_category_counts, read_shape_lazy
+from annbatch_grouped.data_gen import make_category_counts, read_obs_lazy
 from annbatch_grouped.default_profile_lists import (
     DEFAULT_APPEND_REAL_COLUMNS,
     DEFAULT_PREVIEW_APPEND_PROFILES,
@@ -20,161 +22,37 @@ from annbatch_grouped.paths import TAHOE_ZARR
 @dataclass(frozen=True)
 class PlanEntry:
     column_name: str
-    categories: np.ndarray
+    categories: list[str]
     counts: np.ndarray
-    preview_labels: np.ndarray
+    preview_labels: list[str]
 
 
-def _string_dtype() -> np.dtype:
-    return np.dtypes.StringDType()
-
-
-def _signed_code_dtype(n_categories: int) -> np.dtype:
-    if n_categories <= np.iinfo(np.int8).max:
-        return np.dtype(np.int8)
-    if n_categories <= np.iinfo(np.int16).max:
-        return np.dtype(np.int16)
-    if n_categories <= np.iinfo(np.int32).max:
-        return np.dtype(np.int32)
-    return np.dtype(np.int64)
-
-
-def _prefixed_categories(prefix: str, n_categories: int) -> np.ndarray:
+def _prefixed_categories(prefix: str, n_categories: int) -> list[str]:
     width = max(1, len(str(n_categories - 1)))
-    values = [f"{prefix}_{i:0{width}d}" for i in range(n_categories)]
-    return np.asarray(values, dtype=_string_dtype())
+    return [f"{prefix}_{i:0{width}d}" for i in range(n_categories)]
 
 
-def _string_sort_order(values: np.ndarray) -> np.ndarray:
-    normalized = np.asarray(values.tolist(), dtype=object)
-    return np.argsort(normalized)
+def _normalize_string(value) -> str:
+    if isinstance(value, bytes):
+        return value.decode()
+    if pd.isna(value):
+        return "NA"
+    return str(value)
 
 
-def _write_contiguous_codes(codes_array, counts: np.ndarray, *, dtype: np.dtype) -> None:
-    chunk_len = int(codes_array.chunks[0]) if codes_array.chunks else 1_000_000
-    pos = 0
-    for code, count in enumerate(counts.astype(np.int64, copy=False)):
-        remaining = int(count)
-        while remaining > 0:
-            block = min(remaining, chunk_len)
-            codes_array[pos : pos + block] = np.full(block, code, dtype=dtype)
-            pos += block
-            remaining -= block
+def _series_as_strings(series: pd.Series) -> pd.Series:
+    return pd.Series([_normalize_string(v) for v in series.to_numpy()], index=series.index, name=series.name)
 
 
-def _write_categorical_column(
-    obs_group,
-    column_name: str,
-    categories: np.ndarray,
-    counts: np.ndarray,
-    *,
-    ordered: bool = False,
-) -> None:
-    template = obs_group["cell_line"]
-    template_codes = template["codes"]
-    template_categories = template["categories"]
-    code_dtype = _signed_code_dtype(len(categories))
-
-    if column_name in obs_group:
-        del obs_group[column_name]
-
-    col_group = obs_group.create_group(column_name)
-    col_group.attrs["encoding-type"] = "categorical"
-    col_group.attrs["encoding-version"] = "0.2.0"
-    col_group.attrs["ordered"] = ordered
-
-    col_group.create_array(
-        "categories",
-        data=np.asarray(categories, dtype=_string_dtype()),
-        chunks=template_categories.chunks,
-        compressors=template_categories.compressors,
-        fill_value=None,
-    )
-    codes_array = col_group.create_array(
-        "codes",
-        shape=(int(counts.sum()),),
-        dtype=code_dtype,
-        chunks=template_codes.chunks,
-        compressors=template_codes.compressors,
-        fill_value=None,
-    )
-    _write_contiguous_codes(codes_array, counts, dtype=code_dtype)
+def _counts_from_series(series: pd.Series) -> tuple[list[str], np.ndarray]:
+    counts = _series_as_strings(series).value_counts(dropna=False).sort_index()
+    return counts.index.tolist(), counts.to_numpy(dtype=np.int64)
 
 
-def _update_column_order(obs_group, columns: list[str]) -> None:
-    order = list(obs_group.attrs.get("column-order", []))
-    for column in columns:
-        if column not in order:
-            order.append(column)
-    obs_group.attrs["column-order"] = order
-
-
-def _categorical_counts(obs_group, column: str) -> tuple[np.ndarray, np.ndarray]:
-    col_group = obs_group[column]
-    categories = np.asarray(col_group["categories"][:], dtype=_string_dtype())
-    codes = np.asarray(col_group["codes"][:], dtype=np.int64)
-    valid = codes >= 0
-    counts = np.bincount(codes[valid], minlength=len(categories))
-    used = counts > 0
-    categories = categories[used]
-    counts = counts[used]
-    order = _string_sort_order(categories)
-    return categories[order], counts[order]
-
-
-def _combined_counts(obs_group, left: str, right: str) -> tuple[np.ndarray, np.ndarray]:
-    left_group = obs_group[left]
-    right_group = obs_group[right]
-
-    left_categories = np.asarray(left_group["categories"][:], dtype=_string_dtype())
-    right_categories = np.asarray(right_group["categories"][:], dtype=_string_dtype())
-    left_codes = np.asarray(left_group["codes"][:], dtype=np.int64)
-    right_codes = np.asarray(right_group["codes"][:], dtype=np.int64)
-
-    left_order = _string_sort_order(left_categories)
-    right_order = _string_sort_order(right_categories)
-    left_inverse = np.empty(len(left_categories), dtype=np.int64)
-    right_inverse = np.empty(len(right_categories), dtype=np.int64)
-    left_inverse[left_order] = np.arange(len(left_order), dtype=np.int64)
-    right_inverse[right_order] = np.arange(len(right_order), dtype=np.int64)
-
-    valid = (left_codes >= 0) & (right_codes >= 0)
-    combined = left_inverse[left_codes[valid]] * len(right_categories) + right_inverse[right_codes[valid]]
-    counts = np.bincount(combined, minlength=len(left_categories) * len(right_categories))
-    nonzero = np.flatnonzero(counts)
-    categories = _prefixed_categories("cell_line-drug_sorted", len(nonzero))
-    return categories, counts[nonzero]
-
-
-def _combined_preview_labels(obs_group, left: str, right: str) -> np.ndarray:
-    left_group = obs_group[left]
-    right_group = obs_group[right]
-
-    left_categories = np.asarray(left_group["categories"][:], dtype=_string_dtype())
-    right_categories = np.asarray(right_group["categories"][:], dtype=_string_dtype())
-    left_codes = np.asarray(left_group["codes"][:], dtype=np.int64)
-    right_codes = np.asarray(right_group["codes"][:], dtype=np.int64)
-
-    left_order = _string_sort_order(left_categories)
-    right_order = _string_sort_order(right_categories)
-    left_sorted = left_categories[left_order]
-    right_sorted = right_categories[right_order]
-
-    left_inverse = np.empty(len(left_categories), dtype=np.int64)
-    right_inverse = np.empty(len(right_categories), dtype=np.int64)
-    left_inverse[left_order] = np.arange(len(left_order), dtype=np.int64)
-    right_inverse[right_order] = np.arange(len(right_order), dtype=np.int64)
-
-    valid = (left_codes >= 0) & (right_codes >= 0)
-    combined = left_inverse[left_codes[valid]] * len(right_categories) + right_inverse[right_codes[valid]]
-    counts = np.bincount(combined, minlength=len(left_categories) * len(right_categories))
-    nonzero = np.flatnonzero(counts)
-
-    labels = [
-        f"{str(left_sorted[idx // len(right_categories)])} | {str(right_sorted[idx % len(right_categories)])}"
-        for idx in nonzero
-    ]
-    return np.asarray(labels, dtype=_string_dtype())
+def _combined_counts(obs: pd.DataFrame, left: str, right: str) -> tuple[list[str], np.ndarray]:
+    labels = _series_as_strings(obs[left]) + " | " + _series_as_strings(obs[right])
+    counts = labels.value_counts(dropna=False).sort_index()
+    return counts.index.tolist(), counts.to_numpy(dtype=np.int64)
 
 
 def _synthetic_profiles(n_obs: int):
@@ -197,18 +75,18 @@ def _synthetic_plan(n_obs: int) -> list[PlanEntry]:
     return plan
 
 
-def _real_plan(obs_group) -> list[PlanEntry]:
+def _real_plan(obs: pd.DataFrame) -> list[PlanEntry]:
     plan: list[PlanEntry] = []
     for spec in DEFAULT_APPEND_REAL_COLUMNS:
         if spec.source == "cell_line":
-            categories, counts = _categorical_counts(obs_group, "cell_line")
-            preview_labels = categories
+            preview_labels, counts = _counts_from_series(obs["cell_line"])
+            categories = preview_labels
         elif spec.source == "drug":
-            preview_labels, counts = _categorical_counts(obs_group, "drug")
+            preview_labels, counts = _counts_from_series(obs["drug"])
             categories = _prefixed_categories(spec.name, len(counts))
         elif spec.source == ("cell_line", "drug"):
-            preview_labels = _combined_preview_labels(obs_group, "cell_line", "drug")
-            categories, counts = _combined_counts(obs_group, "cell_line", "drug")
+            preview_labels, counts = _combined_counts(obs, "cell_line", "drug")
+            categories = _prefixed_categories(spec.name, len(counts))
         else:
             raise ValueError(f"Unsupported real column source: {spec.source!r}")
         plan.append(
@@ -222,10 +100,22 @@ def _real_plan(obs_group) -> list[PlanEntry]:
     return plan
 
 
+def _build_categorical_column(categories: list[str], counts: np.ndarray) -> pd.Categorical:
+    values = np.repeat(np.asarray(categories, dtype=object), counts.astype(np.int64, copy=False))
+    return pd.Categorical(values, categories=categories, ordered=False)
+
+
+def _apply_plan(obs: pd.DataFrame, plan: list[PlanEntry]) -> pd.DataFrame:
+    updated = obs.copy()
+    for entry in plan:
+        updated[entry.column_name] = _build_categorical_column(entry.categories, entry.counts)
+    return updated
+
+
 def _preview_rows(
-    categories: np.ndarray,
+    categories: list[str],
     counts: np.ndarray,
-    preview_labels: np.ndarray,
+    preview_labels: list[str],
     *,
     limit: int = 5,
 ) -> list[str]:
@@ -236,10 +126,10 @@ def _preview_rows(
         preview_labels[:limit],
         strict=False,
     ):
-        if str(category) == str(preview_label):
-            rows.append(f"      {str(category)}: {int(count):,}")
+        if category == preview_label:
+            rows.append(f"      {category}: {int(count):,}")
         else:
-            rows.append(f"      {str(category)} <- {str(preview_label)}: {int(count):,}")
+            rows.append(f"      {category} <- {preview_label}: {int(count):,}")
     if len(categories) > limit:
         rows.append(f"      ... and {len(categories) - limit:,} more")
     return rows
@@ -269,19 +159,17 @@ def main(src: Path | None, yes: bool) -> None:
     if src is None:
         raise click.ClickException("No --src given and TAHOE_ZARR is not set in paths.conf.")
 
-    n_obs, _ = read_shape_lazy(src)
-    store = zarr.open_group(str(src), mode="a")
-    obs_group = store["obs"]
-
-    plan = _real_plan(obs_group) + _synthetic_plan(n_obs)
-    target_columns = [entry.column_name for entry in plan]
-    existing = [column for column in target_columns if column in obs_group]
-
     print("=" * 72)
     print("Append sorted Tahoe and synthetic distributions to obs")
     print("=" * 72)
     print(f"  source:        {src}")
+    print("\nReading full obs into memory...")
+    obs, (n_obs, _) = read_obs_lazy(src)
     print(f"  n_obs:         {n_obs:,}")
+
+    plan = _real_plan(obs) + _synthetic_plan(n_obs)
+    target_columns = [entry.column_name for entry in plan]
+    existing = [column for column in target_columns if column in obs.columns]
     print(f"  add columns:   {', '.join(target_columns)}")
     _print_plan_preview(plan)
 
@@ -292,15 +180,14 @@ def main(src: Path | None, yes: bool) -> None:
     elif not yes and not click.confirm("\nPreview shown above. Write these columns to obs?", default=True):
         raise SystemExit(0)
 
-    print("\nWriting columns...")
-    for entry in plan:
-        print(
-            f"  {entry.column_name:<24} categories={len(entry.categories):,} "
-            f"min={int(entry.counts.min()):,} max={int(entry.counts.max()):,}"
-        )
-        _write_categorical_column(obs_group, entry.column_name, entry.categories, entry.counts)
+    print("\nBuilding updated obs in memory...")
+    updated_obs = _apply_plan(obs, plan)
 
-    _update_column_order(obs_group, target_columns)
+    print("Replacing /obs in zarr store...")
+    store = zarr.open_group(str(src), mode="a")
+    if "obs" in store:
+        del store["obs"]
+    ad.io.write_elem(store, "obs", updated_obs)
 
     print("\nDone.")
     print(f"Updated obs in: {src}")
