@@ -76,6 +76,28 @@ def _label_for_keys(groupby_keys: set[str]) -> str:
     return f"{len(labels)} profiles"
 
 
+def _iter_samples_per_sec(payload: dict) -> list[float]:
+    repeats = payload.get("repeats")
+    if isinstance(repeats, list) and repeats:
+        values: list[float] = []
+        for repeat in repeats:
+            if repeat.get("status") != "ok":
+                continue
+            metrics = repeat.get("metrics", {})
+            samples_per_sec = float(metrics.get("samples_per_sec", 0.0))
+            if samples_per_sec > 0:
+                values.append(samples_per_sec)
+        return values
+
+    if payload.get("status") != "ok":
+        return []
+    metrics = payload.get("metrics", {})
+    samples_per_sec = float(metrics.get("samples_per_sec", 0.0))
+    if samples_per_sec <= 0:
+        return []
+    return [samples_per_sec]
+
+
 def _collect_landscape_points(
     experiment_dirs: list[Path],
     distribution_stats: dict[str, DistributionStats],
@@ -90,19 +112,16 @@ def _collect_landscape_points(
             continue
         for run_path in sorted(runs_dir.glob("*.json")):
             payload = json.loads(run_path.read_text())
-            if payload.get("status") != "ok":
-                continue
             groupby_key = str(payload.get("groupby_key", ""))
             stats = distribution_stats.get(groupby_key)
             if stats is None:
                 missing_distribution_keys.add(groupby_key)
                 continue
-            metrics = payload.get("metrics", {})
-            samples_per_sec = float(metrics.get("samples_per_sec", 0.0))
-            if samples_per_sec <= 0:
-                continue
             mode = str(payload["mode"])
             if mode not in modes:
+                continue
+            samples_per_sec_values = _iter_samples_per_sec(payload)
+            if not samples_per_sec_values:
                 continue
             aggregate_key = (mode, stats.n_categories, stats.imbalance_ratio)
             aggregate = aggregates.setdefault(
@@ -113,8 +132,8 @@ def _collect_landscape_points(
                     "groupby_keys": set(),
                 },
             )
-            aggregate["sum_sps"] += samples_per_sec
-            aggregate["n_runs"] += 1
+            aggregate["sum_sps"] += float(sum(samples_per_sec_values))
+            aggregate["n_runs"] += len(samples_per_sec_values)
             aggregate["groupby_keys"].add(groupby_key)
 
     points = [

@@ -15,6 +15,7 @@ from annbatch_grouped.default_profile_lists import (
 )
 
 DEFAULT_CPU_CONSTRAINT = "intel_xeon_6248r"
+DEFAULT_REPEATS = 1
 DEFAULT_WARMUP = 5
 DEFAULT_MODES = ("random", "categorical")
 GROUPBY_MODES = ("categorical", "scdataset")
@@ -24,6 +25,11 @@ def _default_groupby_keys() -> list[str]:
     keys = [spec.name for spec in DEFAULT_APPEND_REAL_COLUMNS]
     keys.extend(profile.name for profile in DEFAULT_PREVIEW_APPEND_PROFILES)
     return keys
+
+
+def _job_name(mode: str, groupby_key: str) -> str:
+    safe_key = groupby_key.replace("/", "-").replace(" ", "_")
+    return f"bench_{mode}_{safe_key}"[:120]
 
 
 @click.command()
@@ -45,6 +51,13 @@ def _default_groupby_keys() -> list[str]:
     help="Warmup batches forwarded to bench.sbatch.",
 )
 @click.option(
+    "--repeats",
+    type=int,
+    default=DEFAULT_REPEATS,
+    show_default=True,
+    help="Repeat count forwarded to bench.sbatch.",
+)
+@click.option(
     "--mode",
     "modes",
     type=click.Choice(DEFAULT_MODES),
@@ -56,6 +69,7 @@ def main(
     experiment: str | None,
     cpu_constraint: str,
     warmup: int,
+    repeats: int,
     modes: tuple[str, ...],
 ) -> None:
     bench_sbatch = Path(__file__).resolve().with_name("bench.sbatch")
@@ -72,22 +86,30 @@ def main(
     print(f"  experiment:     {experiment}")
     print(f"  constraint:     {cpu_constraint}")
     print(f"  warmup:         {warmup}")
+    print(f"  repeats:        {repeats}")
     print(f"  groupby keys:   {', '.join(groupby_keys)}")
     print(f"  modes:          {', '.join(modes)}")
     selected_groupby_modes = tuple(mode for mode in modes if mode in GROUPBY_MODES)
-    total_jobs = (1 if "random" in modes else 0) + len(groupby_keys) * len(selected_groupby_modes)
-    print(f"  total jobs:     {total_jobs}")
+    total_submissions = (1 if "random" in modes else 0) + len(groupby_keys) * len(selected_groupby_modes)
+    print(f"  total submits:  {total_submissions}")
+    print(f"  total subjobs:  {total_submissions * repeats}")
 
     def build_command(mode: str, groupby_key: str) -> list[str]:
-        return [
+        command = [
             "sbatch",
             f"--constraint={cpu_constraint}",
+            f"--job-name={_job_name(mode, groupby_key)}",
             str(bench_sbatch),
             mode,
             groupby_key,
             experiment,
             str(warmup),
+            str(repeats),
+            cpu_constraint,
         ]
+        if repeats > 1:
+            command.insert(1, f"--array=1-{repeats}")
+        return command
 
     if "random" in modes:
         random_groupby_key = groupby_keys[0]

@@ -37,12 +37,16 @@ class BenchOutcome:
     experiment: str
     mode: str
     groupby_key: str
+    cpu_constraint: str | None
     status: str
     samples_per_sec: float | None
     total_time_s: float | None
     reason: str | None
     trace: list[tuple[float, float]]
     run_path: Path
+    successful_repeats: int
+    requested_repeats: int
+    failed_repeats: int
 
 
 def _groupby_keys() -> list[str]:
@@ -80,6 +84,7 @@ def _parse_run(run_path: Path) -> BenchOutcome:
     payload = json.loads(run_path.read_text())
     status = payload["status"]
     metrics = payload.get("metrics", {})
+    repeat_summary = payload.get("repeat_summary", {})
     trace = [
         (
             float(point.get("elapsed_s", point["samples_seen"] / point["samples_per_sec"])),
@@ -87,16 +92,103 @@ def _parse_run(run_path: Path) -> BenchOutcome:
         )
         for point in payload.get("throughput_trace", [])
     ]
+    successful_repeats = int(
+        repeat_summary.get(
+            "successful_repeats",
+            1 if status == "ok" else 0,
+        )
+    )
+    requested_repeats = int(repeat_summary.get("requested_repeats", max(successful_repeats, 1)))
+    failed_repeats = int(repeat_summary.get("failed_repeats", max(requested_repeats - successful_repeats, 0)))
     return BenchOutcome(
         experiment=str(payload.get("experiment", run_path.parent.parent.name)),
         mode=str(payload["mode"]),
         groupby_key=str(payload["groupby_key"]),
+        cpu_constraint=str(payload["cpu_constraint"]) if payload.get("cpu_constraint") else None,
         status=status,
-        samples_per_sec=float(metrics["samples_per_sec"]) if status == "ok" else None,
-        total_time_s=float(metrics["total_time_s"]) if status == "ok" else None,
-        reason=None if status == "ok" else str(payload.get("error", {}).get("message", "Unknown failure")),
+        samples_per_sec=float(metrics["samples_per_sec"]) if "samples_per_sec" in metrics else None,
+        total_time_s=float(metrics["total_time_s"]) if "total_time_s" in metrics else None,
+        reason=None if status in {"ok", "partial"} else str(payload.get("error", {}).get("message", "Unknown failure")),
         trace=trace,
         run_path=run_path,
+        successful_repeats=successful_repeats,
+        requested_repeats=requested_repeats,
+        failed_repeats=failed_repeats,
+    )
+
+
+def _aggregate_trace(outcomes: list[BenchOutcome]) -> list[tuple[float, float]]:
+    trace_outcomes = [outcome for outcome in outcomes if outcome.trace and outcome.successful_repeats > 0]
+    if not trace_outcomes:
+        return []
+    if len(trace_outcomes) == 1:
+        return trace_outcomes[0].trace
+
+    min_len = min(len(outcome.trace) for outcome in trace_outcomes)
+    if min_len == 0:
+        return []
+
+    x_histories = np.asarray(
+        [[point[0] for point in outcome.trace[:min_len]] for outcome in trace_outcomes],
+        dtype=np.float64,
+    )
+    y_histories = np.asarray(
+        [[point[1] for point in outcome.trace[:min_len]] for outcome in trace_outcomes],
+        dtype=np.float64,
+    )
+    weights = np.asarray([outcome.successful_repeats for outcome in trace_outcomes], dtype=np.float64)
+    x = np.average(x_histories, axis=0, weights=weights)
+    y = np.average(y_histories, axis=0, weights=weights)
+    return [(float(xi), float(yi)) for xi, yi in zip(x, y, strict=True)]
+
+
+def _aggregate_outcome_group(outcomes: list[BenchOutcome]) -> BenchOutcome:
+    if len(outcomes) == 1:
+        return outcomes[0]
+
+    successful = [outcome for outcome in outcomes if outcome.successful_repeats > 0 and outcome.samples_per_sec is not None]
+    successful_repeats = sum(outcome.successful_repeats for outcome in outcomes)
+    failed_repeats = sum(outcome.failed_repeats for outcome in outcomes)
+    requested_repeats = max(
+        [outcome.requested_repeats for outcome in outcomes] + [successful_repeats + failed_repeats]
+    )
+
+    if successful_repeats == 0:
+        status = "failed"
+    elif failed_repeats > 0 or successful_repeats < requested_repeats:
+        status = "partial"
+    else:
+        status = "ok"
+
+    cpu_constraints = sorted({outcome.cpu_constraint for outcome in outcomes if outcome.cpu_constraint})
+    cpu_constraint = ", ".join(cpu_constraints) if cpu_constraints else None
+    reason = None
+    if status == "failed":
+        reasons = sorted({outcome.reason for outcome in outcomes if outcome.reason})
+        reason = "; ".join(reasons) if reasons else "Unknown failure"
+
+    if successful:
+        weights = np.asarray([outcome.successful_repeats for outcome in successful], dtype=np.float64)
+        samples_per_sec = float(np.average([outcome.samples_per_sec for outcome in successful], weights=weights))
+        total_time_s = float(np.average([outcome.total_time_s for outcome in successful], weights=weights))
+    else:
+        samples_per_sec = None
+        total_time_s = None
+
+    return BenchOutcome(
+        experiment=successful[0].experiment if successful else outcomes[0].experiment,
+        mode=outcomes[0].mode,
+        groupby_key=outcomes[0].groupby_key,
+        cpu_constraint=cpu_constraint,
+        status=status,
+        samples_per_sec=samples_per_sec,
+        total_time_s=total_time_s,
+        reason=reason,
+        trace=_aggregate_trace(outcomes),
+        run_path=sorted(outcomes, key=lambda outcome: outcome.run_path.name)[0].run_path,
+        successful_repeats=successful_repeats,
+        requested_repeats=requested_repeats,
+        failed_repeats=failed_repeats,
     )
 
 
@@ -104,11 +196,14 @@ def _collect_outcomes(experiment_dir: Path) -> dict[tuple[str, str], BenchOutcom
     runs_dir = experiment_dir / "runs"
     if not runs_dir.exists():
         raise click.ClickException(f"Run directory does not exist: {runs_dir}")
-    outcomes: dict[tuple[str, str], BenchOutcome] = {}
+    grouped_outcomes: dict[tuple[str, str], list[BenchOutcome]] = {}
     for run_path in sorted(runs_dir.glob("*.json")):
         outcome = _parse_run(run_path)
-        outcomes[(outcome.groupby_key, outcome.mode)] = outcome
-    return outcomes
+        grouped_outcomes.setdefault((outcome.groupby_key, outcome.mode), []).append(outcome)
+    return {
+        key: _aggregate_outcome_group(group)
+        for key, group in grouped_outcomes.items()
+    }
 
 
 def _lookup_outcome(outcomes: dict[tuple[str, str], BenchOutcome], groupby_key: str, mode: str) -> BenchOutcome | None:
@@ -161,7 +256,7 @@ def _plot_mode_panel(ax, outcome: BenchOutcome | None, mode: str, max_elapsed_s:
         ax.set_yticks([])
         return
 
-    if outcome.status != "ok" or outcome.samples_per_sec is None or not outcome.trace:
+    if outcome.status not in {"ok", "partial"} or outcome.samples_per_sec is None or not outcome.trace:
         reason = (outcome.reason or "unknown error").replace("Observation range", "range")
         reason = textwrap.fill(reason, width=30)
         run_name = textwrap.shorten(outcome.run_path.name, width=34, placeholder="...")
@@ -200,13 +295,34 @@ def _plot_mode_panel(ax, outcome: BenchOutcome | None, mode: str, max_elapsed_s:
     ax.text(
         0.98,
         0.95,
-        f"{outcome.samples_per_sec:,.0f} samples/s\n{outcome.total_time_s:.1f}s total",
+        (
+            f"{outcome.samples_per_sec:,.0f} samples/s\n"
+            f"{outcome.total_time_s:.1f}s total\n"
+            f"repeats {outcome.successful_repeats}/{outcome.requested_repeats}"
+            + (
+                f"\ncpu {textwrap.shorten(outcome.cpu_constraint, width=22, placeholder='...')}"
+                if outcome.cpu_constraint
+                else ""
+            )
+        ),
         transform=ax.transAxes,
         ha="right",
         va="top",
         fontsize=8,
         bbox={"boxstyle": "round,pad=0.3", "facecolor": "white", "edgecolor": "#cbd5e1"},
     )
+    if outcome.failed_repeats:
+        ax.text(
+            0.02,
+            0.95,
+            f"{outcome.failed_repeats} failed",
+            transform=ax.transAxes,
+            ha="left",
+            va="top",
+            fontsize=8,
+            color="#991b1b",
+            bbox={"boxstyle": "round,pad=0.25", "facecolor": "#fee2e2", "edgecolor": "#fca5a5"},
+        )
 
 
 @click.command()
@@ -233,9 +349,14 @@ def main(experiment_root: Path, experiment: str | None, distribution_dir: Path, 
     experiment_dir = _resolve_experiment_dir(experiment_root, experiment)
     outcomes = _collect_outcomes(experiment_dir)
     keys = _groupby_keys()
-    ok_outcomes = [outcome for outcome in outcomes.values() if outcome.status == "ok" and outcome.trace]
+    ok_outcomes = [
+        outcome
+        for outcome in outcomes.values()
+        if outcome.status in {"ok", "partial"} and outcome.trace
+    ]
     max_elapsed_s = max((point[0] for outcome in ok_outcomes for point in outcome.trace), default=1.0)
     max_sps = max((point[1] for outcome in ok_outcomes for point in outcome.trace), default=1.0)
+    cpu_constraints = sorted({outcome.cpu_constraint for outcome in outcomes.values() if outcome.cpu_constraint})
 
     fig, axes = plt.subplots(
         nrows=len(keys),
@@ -251,7 +372,10 @@ def main(experiment_root: Path, experiment: str | None, distribution_dir: Path, 
         for col_idx, mode in enumerate(DEFAULT_MODES, start=1):
             _plot_mode_panel(axes[row_idx, col_idx], _lookup_outcome(outcomes, key, mode), mode, max_elapsed_s, max_sps)
 
-    fig.suptitle(f"Distributions and Benchmark Throughput: {experiment_dir.name}", fontsize=16, fontweight="bold")
+    title = f"Distributions and Benchmark Throughput: {experiment_dir.name}"
+    if cpu_constraints:
+        title += f" | CPU constraint: {', '.join(cpu_constraints)}"
+    fig.suptitle(title, fontsize=16, fontweight="bold")
     fig.tight_layout(rect=[0, 0, 1, 0.98])
     output.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output, dpi=170, bbox_inches="tight")
