@@ -16,6 +16,7 @@ mkdir -p logs
 source .venv/bin/activate
 
 MODE="${1:-categorical}"
+GROUPBY_KEY="${2:-cell_line_sorted}"
 
 echo "=== Job info ==="
 echo "Job ID:    $SLURM_JOB_ID"
@@ -24,14 +25,19 @@ echo "Started:   $(date)"
 echo "Mem alloc: ${SLURM_MEM_PER_NODE}MB"
 echo "CPUs:      $SLURM_CPUS_PER_TASK"
 echo "Mode:      $MODE"
+echo "Groupby:   $GROUPBY_KEY"
 echo ""
 
-python -u scripts/bench.py \
-    --mode "$MODE" \
-    --batch_size 4096 \
-    --chunk_size 512 \
-    --preload_nchunks 64 \
+CMD=(python -u scripts/bench.py
+    --mode "$MODE"
+    --groupby_key "$GROUPBY_KEY"
+    --batch_size 4096
+    --chunk_size 512
+    --preload_nchunks 64
     --n_batches 500
+)
+
+"${CMD[@]}"
 
 echo ""
 echo "Finished: $(date)"

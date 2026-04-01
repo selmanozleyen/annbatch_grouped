@@ -1,19 +1,17 @@
-"""Benchmark loader strategies on per-cell-line zarr stores.
+"""Benchmark loader strategies on a single zarr store.
 
-Three modes:
-  1. per_category   -- PerCategoryZarrLoader baseline (random category, random rows)
-  2. random         -- annbatch Loader + RandomSampler over all stores
-  3. categorical    -- annbatch Loader + CategoricalSampler via GroupedCollection
+Two modes:
+  1. random       -- annbatch Loader + RandomSampler
+  2. categorical  -- annbatch Loader + CategoricalSampler from category bounds
 
 Usage:
     python scripts/bench.py
-    python scripts/bench.py --mode categorical
-    python scripts/bench.py --mode per_category --mode random
+    python scripts/bench.py --mode categorical --groupby_key cell_line_sorted
+    python scripts/bench.py --mode random --mode categorical
     python scripts/bench.py --batch_size 4096 --chunk_size 512 --preload_nchunks 64
 """
 from __future__ import annotations
 
-import os
 import time
 from typing import TYPE_CHECKING
 
@@ -23,11 +21,9 @@ import numpy as np
 import zarr
 
 from annbatch import Loader
-from annbatch.io import GroupedCollection
 from annbatch.samplers import CategoricalSampler
-from annbatch_grouped.baselines import PerCategoryZarrLoader
 from annbatch_grouped.bench_utils import benchmark_iterator, print_results_table, save_results
-from annbatch_grouped.paths import DATA_DIR
+from annbatch_grouped.paths import DATA_DIR, TAHOE_ZARR
 
 if TYPE_CHECKING:
     from annbatch_grouped.bench_utils import BenchmarkResult
@@ -50,12 +46,8 @@ def _rss() -> str:
     return "?"
 
 
-def _discover_stores(store_dir: str) -> list[str]:
-    return sorted(
-        os.path.join(store_dir, d)
-        for d in os.listdir(store_dir)
-        if d.endswith(".zarr")
-    )
+def _open_store(store_path: str) -> zarr.Group:
+    return zarr.open_group(store_path, mode="r", use_consolidated=False)
 
 
 def _format_compressors(compressors) -> str:
@@ -71,43 +63,28 @@ def _format_compressors(compressors) -> str:
     return ", ".join(parts)
 
 
-def _source_storage_summary(store_dir: str) -> dict[str, set[tuple[str, str, str]]]:
-    summary: dict[str, set[tuple[str, str, str]]] = {
-        "X/data": set(),
-        "X/indices": set(),
-        "X/indptr": set(),
-    }
-    for sp in _discover_stores(store_dir):
-        g = zarr.open_group(sp, mode="r")
-        for key in summary:
-            arr = g[key]
-            summary[key].add(
-                (
-                    str(arr.chunks),
-                    str(getattr(arr, "shards", None)),
-                    _format_compressors(arr.compressors),
-                )
-            )
+def _source_storage_summary(store_path: str) -> dict[str, tuple[str, str, str]]:
+    summary: dict[str, tuple[str, str, str]] = {}
+    g = _open_store(store_path)
+    for key in ("X/data", "X/indices", "X/indptr"):
+        arr = g[key]
+        summary[key] = (
+            str(arr.chunks),
+            str(getattr(arr, "shards", None)),
+            _format_compressors(arr.compressors),
+        )
     return summary
 
 
-def _print_source_storage_summary(store_dir: str) -> None:
-    store_paths = _discover_stores(store_dir)
-    print(f"  source stores:    {len(store_paths)}")
-    summary = _source_storage_summary(store_dir)
+def _print_source_storage_summary(store_path: str) -> None:
+    summary = _source_storage_summary(store_path)
     print("  source storage:")
     for key in ("X/data", "X/indices", "X/indptr"):
-        configs = sorted(summary[key])
-        if len(configs) == 1:
-            chunks, shards, compressors = configs[0]
-            print(f"    {key}:")
-            print(f"      chunks:      {chunks}")
-            print(f"      shards:      {shards}")
-            print(f"      compressors: {compressors}")
-        else:
-            print(f"    {key}: {len(configs)} configs")
-            for chunks, shards, compressors in configs[:3]:
-                print(f"      chunks={chunks} shards={shards} compressors={compressors}")
+        chunks, shards, compressors = summary[key]
+        print(f"    {key}:")
+        print(f"      chunks:      {chunks}")
+        print(f"      shards:      {shards}")
+        print(f"      compressors: {compressors}")
 
 
 def _header(title: str):
@@ -143,49 +120,53 @@ def _run_benchmark(
     return result
 
 
-def _load_stores_into_loader(loader: Loader, store_dir: str) -> int:
-    """Open every .zarr in *store_dir* and add to *loader*. Returns total n_obs."""
-    total = 0
-    for sp in _discover_stores(store_dir):
-        g = zarr.open_group(sp, mode="r")
-        adata = ad.AnnData(X=ad.io.sparse_dataset(g["X"]))
-        loader.add_adata(adata)
-        total += adata.shape[0]
-    return total
+def _load_store_adata(store_path: str) -> ad.AnnData:
+    g = _open_store(store_path)
+    return ad.AnnData(X=ad.io.sparse_dataset(g["X"]))
+
+
+def _read_group_slices(store_path: str, groupby_key: str) -> tuple[list[slice], list[str], np.ndarray]:
+    g = _open_store(store_path)
+    if "obs" not in g:
+        raise ValueError(f"obs group not found in {store_path}")
+    obs = g["obs"]
+    if groupby_key not in obs:
+        cols = ", ".join(str(k) for k in obs.keys() if str(k) != "_index")
+        raise ValueError(f"obs column {groupby_key!r} not found. Available: {cols}")
+
+    elem = obs[groupby_key]
+    if not (hasattr(elem, "keys") and "codes" in elem and "categories" in elem):
+        raise ValueError(f"obs column {groupby_key!r} is not stored as categorical")
+
+    codes = np.asarray(elem["codes"], dtype=np.int64)
+    categories = np.asarray(elem["categories"]).tolist()
+    valid = codes >= 0
+    if not np.all(valid):
+        raise ValueError(f"obs column {groupby_key!r} contains missing category codes")
+    if codes.size == 0:
+        raise ValueError(f"obs column {groupby_key!r} has no rows")
+
+    starts = np.flatnonzero(np.r_[True, codes[1:] != codes[:-1]])
+    stops = np.r_[starts[1:], codes.size]
+    boundaries = [slice(int(start), int(stop)) for start, stop in zip(starts, stops, strict=True)]
+    group_codes = codes[starts]
+    group_labels = [str(categories[int(code)]) for code in group_codes]
+    group_counts = (stops - starts).astype(np.int64)
+
+    if len(group_labels) != len(set(group_labels)):
+        raise ValueError(
+            f"obs column {groupby_key!r} is not contiguous by category. "
+            "Expected one contiguous block per category."
+        )
+
+    return boundaries, group_labels, group_counts
 
 
 # ---------------------------------------------------------------------------
 # benchmark runners
 # ---------------------------------------------------------------------------
-
-def bench_per_category(
-    store_dir: str, batch_size: int, n_batches: int, warmup: int, seed: int,
-) -> BenchmarkResult:
-    def build_loader():
-        loader = PerCategoryZarrLoader(
-            store_dir=store_dir,
-            batch_size=batch_size,
-            n_batches=warmup + n_batches,
-            seed=seed,
-        )
-        n_cat = len(loader.categories)
-        n_obs = sum(loader.n_obs_per_category.values())
-        extra = {"n_categories": n_cat}
-        summary = f"{n_cat} cats, {n_obs:,} obs"
-        return loader, extra, summary
-
-    return _run_benchmark(
-        "PerCategoryZarrLoader (random category, random rows)",
-        build_loader,
-        loader_name="per_category_zarr",
-        batch_size=batch_size,
-        n_batches=n_batches,
-        warmup=warmup,
-    )
-
-
 def bench_annbatch_random(
-    store_dir: str, batch_size: int, chunk_size: int,
+    store_path: str, batch_size: int, chunk_size: int,
     preload_nchunks: int, n_batches: int, warmup: int, seed: int,
 ) -> BenchmarkResult:
     def build_loader():
@@ -198,10 +179,10 @@ def bench_annbatch_random(
             to_torch=False,
             rng=np.random.default_rng(seed),
         )
-        total_obs = _load_stores_into_loader(loader, store_dir)
-        n_stores = len(loader._train_datasets)
+        adata = _load_store_adata(store_path)
+        loader.add_adata(adata)
         extra = {"chunk_size": chunk_size, "preload_nchunks": preload_nchunks}
-        summary = f"{n_stores} stores, {total_obs:,} obs"
+        summary = f"1 store, {adata.shape[0]:,} obs"
         return loader, extra, summary
 
     return _run_benchmark(
@@ -215,32 +196,31 @@ def bench_annbatch_random(
 
 
 def bench_annbatch_categorical(
-    store_dir: str, batch_size: int, chunk_size: int,
-    preload_nchunks: int, n_batches: int, warmup: int,
+    store_path: str, groupby_key: str, batch_size: int, chunk_size: int,
+    preload_nchunks: int, n_batches: int, warmup: int, seed: int,
 ) -> BenchmarkResult:
-    def _load_x(g: zarr.Group) -> ad.AnnData:
-        return ad.AnnData(X=ad.io.sparse_dataset(g["X"]))
-
     def build_loader():
-        collection = GroupedCollection(store_dir, mode="r")
-        gi = collection.group_index
-        total_obs = int(gi["count"].sum())
-        sampler = CategoricalSampler.from_collection(
-            collection,
+        boundaries, labels, counts = _read_group_slices(store_path, groupby_key)
+        sampler = CategoricalSampler(
+            category_boundaries=boundaries,
             chunk_size=chunk_size,
             preload_nchunks=preload_nchunks,
             batch_size=batch_size,
             num_samples=(warmup + n_batches) * batch_size,
-            rng=np.random.default_rng(42),
+            rng=np.random.default_rng(seed),
         )
         loader = Loader(batch_sampler=sampler, preload_to_gpu=False, to_torch=False)
-        loader.use_collection(collection, load_adata=_load_x)
-        extra = {"chunk_size": chunk_size, "preload_nchunks": preload_nchunks}
-        summary = f"{len(gi)} groups, {total_obs:,} obs"
+        loader.add_adata(_load_store_adata(store_path))
+        extra = {
+            "chunk_size": chunk_size,
+            "preload_nchunks": preload_nchunks,
+            "groupby_key": groupby_key,
+        }
+        summary = f"{len(labels)} groups from {groupby_key}, {int(counts.sum()):,} obs"
         return loader, extra, summary
 
     return _run_benchmark(
-        "annbatch Loader + CategoricalSampler (GroupedCollection)",
+        "annbatch Loader + CategoricalSampler (category bounds)",
         build_loader,
         loader_name="annbatch_categorical",
         batch_size=batch_size,
@@ -254,14 +234,25 @@ def bench_annbatch_categorical(
 # ---------------------------------------------------------------------------
 
 @click.command()
-@click.option("--store_dir", type=str, default=None,
-              help="Dir with per-category .zarr stores (default: DATA_DIR/tahoe_groupby_cell_line)")
+@click.option(
+    "--store_path",
+    type=str,
+    default=None,
+    help="Single zarr store to benchmark (default: TAHOE_ZARR from paths.conf).",
+)
 @click.option(
     "--mode",
     "modes",
-    type=click.Choice(["per_category", "random", "categorical"]),
+    type=click.Choice(["random", "categorical"]),
     multiple=True,
     help="Benchmark mode to run. Repeat to run multiple modes. Default: all.",
+)
+@click.option(
+    "--groupby_key",
+    type=str,
+    default="cell_line_sorted",
+    show_default=True,
+    help="Contiguous categorical obs column used by categorical mode.",
 )
 @click.option("--batch_size", type=int, default=4096)
 @click.option("--chunk_size", type=int, default=512)
@@ -271,46 +262,43 @@ def bench_annbatch_categorical(
 @click.option("--seed", type=int, default=42)
 @click.option("--output_dir", type=str, default=None)
 def main(
-    store_dir, modes, batch_size, chunk_size, preload_nchunks,
+    store_path, modes, groupby_key, batch_size, chunk_size, preload_nchunks,
     n_batches, warmup, seed, output_dir
 ):
-    if store_dir is None:
-        store_dir = str(DATA_DIR / "tahoe_groupby_cell_line")
+    if store_path is None:
+        if not TAHOE_ZARR:
+            raise click.ClickException("No --store_path given and TAHOE_ZARR is not set in paths.conf.")
+        store_path = TAHOE_ZARR
     if output_dir is None:
         output_dir = str(DATA_DIR / "bench_results")
     if not modes:
-        modes = ("per_category", "random", "categorical")
+        modes = ("random", "categorical")
 
     print("=" * 70)
     print("  Loader Benchmarks")
     print("=" * 70)
-    print(f"  store_dir:       {store_dir}")
+    print(f"  store_path:      {store_path}")
     print(f"  modes:           {', '.join(modes)}")
+    print(f"  groupby_key:     {groupby_key}")
     print(f"  batch_size:      {batch_size:,}")
     print(f"  chunk/preload:   {chunk_size} / {preload_nchunks}")
     print(f"  n_batches:       {n_batches:,}")
     if warmup:
         print(f"  warmup:          {warmup}")
-    _print_source_storage_summary(store_dir)
+    _print_source_storage_summary(store_path)
 
     results: list[BenchmarkResult] = []
 
-    if "per_category" in modes:
-        results.append(
-            bench_per_category(
-                store_dir, batch_size, n_batches, warmup, seed
-            )
-        )
     if "random" in modes:
         results.append(
             bench_annbatch_random(
-                store_dir, batch_size, chunk_size, preload_nchunks, n_batches, warmup, seed
+                store_path, batch_size, chunk_size, preload_nchunks, n_batches, warmup, seed
             )
         )
     if "categorical" in modes:
         results.append(
             bench_annbatch_categorical(
-                store_dir, batch_size, chunk_size, preload_nchunks, n_batches, warmup
+                store_path, groupby_key, batch_size, chunk_size, preload_nchunks, n_batches, warmup, seed
             )
         )
 
