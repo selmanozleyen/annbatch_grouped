@@ -25,7 +25,9 @@ class BenchmarkResult:
     batch_size: int
     total_time_s: float
     samples_per_sec: float
+    elapsed_s_history: list[float] = field(default_factory=list)
     samples_seen_history: list[int] = field(default_factory=list)
+    batch_samples_per_sec_history: list[float] = field(default_factory=list)
     samples_per_sec_history: list[float] = field(default_factory=list)
     batch_times_s: list[float] = field(default_factory=list)
     extra: dict = field(default_factory=dict)
@@ -88,21 +90,26 @@ def benchmark_iterator(
                     break
 
     batch_times = []
+    elapsed_s_history = []
     samples_seen_history = []
+    batch_samples_per_sec_history = []
     samples_per_sec_history = []
     t_total = time.perf_counter()
     with tqdm(total=n_batches, desc="timed", unit="batch") as pbar:
         for i, _batch in enumerate(iterator):
-            t_start = time.perf_counter()
-            _ = _batch
-            batch_times.append(time.perf_counter() - t_start)
-            pbar.update(1)
             elapsed = time.perf_counter() - t_total
+            prev_elapsed = elapsed_s_history[-1] if elapsed_s_history else 0.0
+            batch_elapsed = elapsed - prev_elapsed
+            batch_times.append(batch_elapsed)
+            pbar.update(1)
             done_samples = (i + 1) * batch_size
+            batch_rate = batch_size / batch_elapsed if batch_elapsed > 0 else 0.0
             rate = done_samples / elapsed if elapsed > 0 else 0.0
+            elapsed_s_history.append(elapsed)
             samples_seen_history.append(done_samples)
+            batch_samples_per_sec_history.append(batch_rate)
             samples_per_sec_history.append(rate)
-            pbar.set_postfix_str(f"{rate:,.0f} samples/sec")
+            pbar.set_postfix_str(f"{batch_rate:,.0f} samples/sec")
             if i + 1 >= n_batches:
                 break
     total_time = time.perf_counter() - t_total
@@ -118,7 +125,9 @@ def benchmark_iterator(
         batch_size=batch_size,
         total_time_s=total_time,
         samples_per_sec=samples_per_sec,
+        elapsed_s_history=elapsed_s_history,
         samples_seen_history=samples_seen_history,
+        batch_samples_per_sec_history=batch_samples_per_sec_history,
         samples_per_sec_history=samples_per_sec_history,
         batch_times_s=batch_times,
         extra=extra or {},

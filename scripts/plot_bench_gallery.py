@@ -41,7 +41,7 @@ class BenchOutcome:
     samples_per_sec: float | None
     total_time_s: float | None
     reason: str | None
-    trace: list[tuple[int, float]]
+    trace: list[tuple[float, float]]
     run_path: Path
 
 
@@ -76,10 +76,15 @@ def _parse_run(run_path: Path) -> BenchOutcome:
     payload = json.loads(run_path.read_text())
     status = payload["status"]
     metrics = payload.get("metrics", {})
-    trace = [
-        (int(point["samples_seen"]), float(point["samples_per_sec"]))
-        for point in payload.get("throughput_trace", [])
-    ]
+    trace = []
+    for point in payload.get("throughput_trace", []):
+        if "elapsed_s" in point and "batch_samples_per_sec" in point:
+            trace.append((float(point["elapsed_s"]), float(point["batch_samples_per_sec"])))
+            continue
+        samples_seen = float(point["samples_seen"])
+        samples_per_sec = float(point["samples_per_sec"])
+        elapsed_s = samples_seen / samples_per_sec if samples_per_sec > 0 else 0.0
+        trace.append((elapsed_s, samples_per_sec))
     return BenchOutcome(
         experiment=str(payload.get("experiment", run_path.parent.parent.name)),
         mode=str(payload["mode"]),
@@ -145,7 +150,7 @@ def _plot_distribution_panel(fig, host_ax, distribution_dir: Path, groupby_key: 
         spine.set_visible(False)
 
 
-def _plot_mode_panel(ax, outcome: BenchOutcome | None, mode: str, max_samples: int, max_sps: float) -> None:
+def _plot_mode_panel(ax, outcome: BenchOutcome | None, mode: str, max_elapsed_s: float, max_sps: float) -> None:
     ax.set_title(mode, fontsize=10, fontweight="bold")
     if outcome is None:
         ax.text(0.5, 0.5, "no run", ha="center", va="center", fontsize=11, color="#64748b")
@@ -182,14 +187,14 @@ def _plot_mode_panel(ax, outcome: BenchOutcome | None, mode: str, max_samples: i
             spine.set_visible(False)
         return
 
-    x = np.asarray([point[0] for point in outcome.trace], dtype=np.int64)
+    x = np.asarray([point[0] for point in outcome.trace], dtype=np.float64)
     y = np.asarray([point[1] for point in outcome.trace], dtype=np.float64)
     ax.plot(x, y, color="#0f766e", linewidth=2)
     ax.fill_between(x, y, color="#99f6e4", alpha=0.3)
-    ax.set_xlim(0, max(max_samples, int(x[-1])) * 1.02)
+    ax.set_xlim(0, max(max_elapsed_s, float(x[-1])) * 1.02)
     ax.set_ylim(0, max(max_sps, float(y.max())) * 1.08 if max_sps > 0 else float(y.max()) * 1.08)
-    ax.set_xlabel("samples seen")
-    ax.set_ylabel("samples/sec")
+    ax.set_xlabel("elapsed seconds")
+    ax.set_ylabel("batch samples/sec")
     ax.text(
         0.98,
         0.95,
@@ -227,7 +232,7 @@ def main(experiment_root: Path, experiment: str | None, distribution_dir: Path, 
     outcomes = _collect_outcomes(experiment_dir)
     keys = _groupby_keys()
     ok_outcomes = [outcome for outcome in outcomes.values() if outcome.status == "ok" and outcome.trace]
-    max_samples = max((point[0] for outcome in ok_outcomes for point in outcome.trace), default=1)
+    max_elapsed_s = max((point[0] for outcome in ok_outcomes for point in outcome.trace), default=1.0)
     max_sps = max((point[1] for outcome in ok_outcomes for point in outcome.trace), default=1.0)
 
     fig, axes = plt.subplots(
@@ -242,7 +247,7 @@ def main(experiment_root: Path, experiment: str | None, distribution_dir: Path, 
     for row_idx, key in enumerate(keys):
         _plot_distribution_panel(fig, axes[row_idx, 0], distribution_dir, key)
         for col_idx, mode in enumerate(DEFAULT_MODES, start=1):
-            _plot_mode_panel(axes[row_idx, col_idx], _lookup_outcome(outcomes, key, mode), mode, max_samples, max_sps)
+            _plot_mode_panel(axes[row_idx, col_idx], _lookup_outcome(outcomes, key, mode), mode, max_elapsed_s, max_sps)
 
     fig.suptitle(f"Distributions and Benchmark Throughput: {experiment_dir.name}", fontsize=16, fontweight="bold")
     fig.tight_layout(rect=[0, 0, 1, 0.98])

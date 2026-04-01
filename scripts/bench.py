@@ -125,9 +125,16 @@ def _result_payload(
     finished_at: str,
 ) -> dict:
     trace = [
-        {"samples_seen": samples_seen, "samples_per_sec": sps}
-        for samples_seen, sps in zip(
+        {
+            "elapsed_s": elapsed_s,
+            "samples_seen": samples_seen,
+            "batch_samples_per_sec": batch_sps,
+            "samples_per_sec": sps,
+        }
+        for elapsed_s, samples_seen, batch_sps, sps in zip(
+            result.elapsed_s_history,
             result.samples_seen_history,
+            result.batch_samples_per_sec_history,
             result.samples_per_sec_history,
             strict=True,
         )

@@ -114,6 +114,20 @@ def plot_category_distribution_axes(axes, payload: dict) -> None:
     ax.xaxis.set_major_locator(MaxNLocator(integer=True))
     if k <= 20:
         ax.set_xticks(ranks)
+    info = f"n_obs={total:,}  k={k}  min={int(sorted_counts.min()):,}  max={int(sorted_counts.max()):,}"
+    if distribution_label:
+        info = f"{distribution_label} | {info}"
+    ax.text(
+        0.02,
+        0.98,
+        info,
+        transform=ax.transAxes,
+        ha="left",
+        va="top",
+        fontsize=8,
+        color="#475569",
+        bbox={"boxstyle": "round,pad=0.25", "facecolor": "white", "edgecolor": "#cbd5e1", "alpha": 0.9},
+    )
 
     ax = axes[1]
     ax.plot(ranks, 100.0 * cumulative_share, color=orange, linewidth=2.5)
@@ -149,19 +163,6 @@ def plot_category_distribution_axes(axes, payload: dict) -> None:
         bbox={"boxstyle": "round,pad=0.35", "facecolor": "white", "edgecolor": "#cbd5e1", "alpha": 0.95},
     )
 
-    info = f"n_obs={total:,}  k={k}  min={int(sorted_counts.min()):,}  max={int(sorted_counts.max()):,}"
-    if distribution_label:
-        info = f"{distribution_label} | {info}"
-    axes[1].text(
-        0.98,
-        -0.22,
-        info,
-        transform=axes[1].transAxes,
-        ha="right",
-        va="top",
-        fontsize=8,
-        color="#475569",
-    )
 
 
 def plot_all_distributions(
