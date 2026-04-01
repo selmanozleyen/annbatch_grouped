@@ -3,20 +3,24 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+import json
 from pathlib import Path
+import shutil
+import tempfile
 
 import anndata as ad
 import click
+import h5py
 import numpy as np
 import pandas as pd
 import zarr
 
-from annbatch_grouped.data_gen import make_category_counts, read_obs_lazy
+from annbatch_grouped.data_gen import make_category_counts
 from annbatch_grouped.default_profile_lists import (
     DEFAULT_APPEND_REAL_COLUMNS,
     DEFAULT_PREVIEW_APPEND_PROFILES,
 )
-from annbatch_grouped.paths import TAHOE_ZARR
+from annbatch_grouped.paths import TAHOE_H5AD, TAHOE_ZARR
 
 
 @dataclass(frozen=True)
@@ -146,6 +150,48 @@ def _print_plan_preview(plan: list[PlanEntry]) -> None:
             print(row)
 
 
+def _root_zarr_json_path(store_path: Path) -> Path:
+    return store_path / "zarr.json"
+
+
+def _drop_consolidated_metadata(store_path: Path) -> None:
+    root_json = _root_zarr_json_path(store_path)
+    payload = json.loads(root_json.read_text())
+    if "consolidated_metadata" in payload:
+        del payload["consolidated_metadata"]
+        root_json.write_text(json.dumps(payload, indent=2) + "\n")
+
+
+def _replace_obs_group(store_path: Path, updated_obs: pd.DataFrame) -> None:
+    with tempfile.TemporaryDirectory(dir=store_path.parent, prefix=f"{store_path.name}.obs.") as tmpdir:
+        tmp_root = Path(tmpdir) / "tmp_obs_store.zarr"
+        tmp_group = zarr.open_group(str(tmp_root), mode="w")
+        with ad.settings.override(
+            zarr_write_format=3,
+            write_csr_csc_indices_with_min_possible_dtype=True,
+        ):
+            ad.io.write_elem(tmp_group, "obs", updated_obs)
+
+        dst_obs = store_path / "obs"
+        src_obs = tmp_root / "obs"
+        if dst_obs.exists():
+            shutil.rmtree(dst_obs)
+        shutil.copytree(src_obs, dst_obs)
+
+
+def _read_obs_from_h5ad(h5ad_path: Path) -> pd.DataFrame:
+    with h5py.File(str(h5ad_path), "r") as handle:
+        return ad.io.read_elem(handle["obs"])
+
+
+def _target_shape_from_zarr(zarr_path: Path) -> tuple[int, int]:
+    root = zarr.open_group(str(zarr_path), mode="r", use_consolidated=False)
+    shape = root["X"].attrs.get("shape", None)
+    if shape is None or len(shape) < 2:
+        raise click.ClickException(f"Could not determine X shape from {zarr_path}")
+    return int(shape[0]), int(shape[1])
+
+
 @click.command()
 @click.option(
     "--src",
@@ -158,13 +204,26 @@ def _print_plan_preview(plan: list[PlanEntry]) -> None:
 def main(src: Path | None, yes: bool) -> None:
     if src is None:
         raise click.ClickException("No --src given and TAHOE_ZARR is not set in paths.conf.")
+    if not TAHOE_H5AD:
+        raise click.ClickException("TAHOE_H5AD is not set in paths.conf.")
+
+    h5ad_path = Path(TAHOE_H5AD)
+    if not h5ad_path.exists():
+        raise click.ClickException(f"TAHOE_H5AD does not exist: {h5ad_path}")
 
     print("=" * 72)
     print("Append sorted Tahoe and synthetic distributions to obs")
     print("=" * 72)
-    print(f"  source:        {src}")
-    print("\nReading full obs into memory...")
-    obs, (n_obs, _) = read_obs_lazy(src)
+    print(f"  target zarr:   {src}")
+    print(f"  source h5ad:   {h5ad_path}")
+    print("\nReading full obs from h5ad into memory...")
+    obs = _read_obs_from_h5ad(h5ad_path)
+    n_obs = int(obs.shape[0])
+    target_n_obs, _ = _target_shape_from_zarr(src)
+    if n_obs != target_n_obs:
+        raise click.ClickException(
+            f"Row count mismatch: h5ad obs has {n_obs:,} rows but zarr X has {target_n_obs:,} rows."
+        )
     print(f"  n_obs:         {n_obs:,}")
 
     plan = _real_plan(obs) + _synthetic_plan(n_obs)
@@ -184,10 +243,9 @@ def main(src: Path | None, yes: bool) -> None:
     updated_obs = _apply_plan(obs, plan)
 
     print("Replacing /obs in zarr store...")
-    store = zarr.open_group(str(src), mode="a")
-    if "obs" in store:
-        del store["obs"]
-    ad.io.write_elem(store, "obs", updated_obs)
+    _replace_obs_group(src, updated_obs)
+    print("Leaving zarr metadata unconsolidated...")
+    _drop_consolidated_metadata(src)
 
     print("\nDone.")
     print(f"Updated obs in: {src}")
