@@ -33,6 +33,10 @@ optional-dependencies.viz = [
   "matplotlib",
   "seaborn",
 ]
+optional-dependencies.scdataset = [
+  "scDataset",
+  "torch",
+]
 
 [dependency-groups]
 dev = [

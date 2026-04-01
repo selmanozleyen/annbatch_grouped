@@ -17,6 +17,7 @@ source .venv/bin/activate
 
 MODE="${1:-categorical}"
 GROUPBY_KEY="${2:-cell_line_sorted}"
+EXPERIMENT="${3:-manual}"
 
 echo "=== Job info ==="
 echo "Job ID:    $SLURM_JOB_ID"
@@ -26,11 +27,13 @@ echo "Mem alloc: ${SLURM_MEM_PER_NODE}MB"
 echo "CPUs:      $SLURM_CPUS_PER_TASK"
 echo "Mode:      $MODE"
 echo "Groupby:   $GROUPBY_KEY"
+echo "Experiment: $EXPERIMENT"
 echo ""
 
 CMD=(python -u scripts/bench.py
     --mode "$MODE"
     --groupby_key "$GROUPBY_KEY"
+    --experiment "$EXPERIMENT"
     --batch_size 4096
     --chunk_size 512
     --preload_nchunks 64

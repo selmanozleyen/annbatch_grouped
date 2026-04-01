@@ -25,6 +25,7 @@ class BenchmarkResult:
     batch_size: int
     total_time_s: float
     samples_per_sec: float
+    samples_seen_history: list[int] = field(default_factory=list)
     samples_per_sec_history: list[float] = field(default_factory=list)
     batch_times_s: list[float] = field(default_factory=list)
     extra: dict = field(default_factory=dict)
@@ -87,6 +88,7 @@ def benchmark_iterator(
                     break
 
     batch_times = []
+    samples_seen_history = []
     samples_per_sec_history = []
     t_total = time.perf_counter()
     with tqdm(total=n_batches, desc="timed", unit="batch") as pbar:
@@ -98,6 +100,7 @@ def benchmark_iterator(
             elapsed = time.perf_counter() - t_total
             done_samples = (i + 1) * batch_size
             rate = done_samples / elapsed if elapsed > 0 else 0.0
+            samples_seen_history.append(done_samples)
             samples_per_sec_history.append(rate)
             pbar.set_postfix_str(f"{rate:,.0f} samples/sec")
             if i + 1 >= n_batches:
@@ -115,6 +118,7 @@ def benchmark_iterator(
         batch_size=batch_size,
         total_time_s=total_time,
         samples_per_sec=samples_per_sec,
+        samples_seen_history=samples_seen_history,
         samples_per_sec_history=samples_per_sec_history,
         batch_times_s=batch_times,
         extra=extra or {},

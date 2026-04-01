@@ -3,7 +3,7 @@
 This script does not generate AnnData or write grouped stores. It only:
 - simulates category counts for predefined synthetic profiles
 - reads selected obs columns from real data lazily
-- writes distribution plots to the default plot output path
+- writes distribution plots to a dedicated distribution plot directory
 
 By default synthetic previews use `n_obs` from `TAHOE_ZARR` when available, so
 the synthetic profiles match the Tahoe dataset size without generating data.
@@ -428,7 +428,7 @@ def main(
 ):
     output_base = Path(store_dir) if store_dir else RESULTS_DIR
     output_base.mkdir(parents=True, exist_ok=True)
-    plots_dir = output_base / "plots"
+    plots_dir = output_base / "distribution_plots"
     plots_dir.mkdir(parents=True, exist_ok=True)
     _maybe_clean_plots(plots_dir, yes=yes)
 
