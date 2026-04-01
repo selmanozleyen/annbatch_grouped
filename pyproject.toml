@@ -20,18 +20,16 @@ dependencies = [
   "annbatch[zarrs] @ git+https://github.com/selmanozleyen/annbatch.git@feat/groupby-collection-v3",
   "anndata",
   "click",
-  "numpy",
-  "pandas",
-  "scipy",
-  "tqdm",
-  "zarr",
-  "zarrs>=0.2.2",
-]
-optional-dependencies.viz = [
   "ipykernel",
   "jupyter",
   "matplotlib",
+  "numpy",
+  "pandas",
+  "scipy",
   "seaborn",
+  "tqdm",
+  "zarr",
+  "zarrs>=0.2.2",
 ]
 optional-dependencies.scdataset = [
   "scDataset",
