@@ -158,6 +158,7 @@ def _maybe_clean_plots(plots_dir: Path, *, yes: bool) -> None:
 
 def _print_profile_plan(
     profiles: list[CategoryProfile],
+    n_obs: int,
     output_base: Path,
     plots_dir: Path,
     shape_source: str | None,
@@ -176,12 +177,12 @@ def _print_profile_plan(
     print(f"  {'-' * 84}")
     for profile in profiles:
         print(
-            f"  {profile.name:<25} {profile.tag:<44} {profile.n_obs:>12,}"
+            f"  {profile.name:<25} {profile.tag:<44} {n_obs:>12,}"
         )
 
     print("\n  Category distribution summaries:")
     for profile in profiles:
-        summary = profile_summary(profile)
+        summary = profile_summary(profile, n_obs)
         print(
             f"    {profile.tag}: min_group={summary['min_group_size']:,}  "
             f"max_group={summary['max_group_size']:,}  "
@@ -191,12 +192,12 @@ def _print_profile_plan(
     print()
 
 
-def _preview_single_synthetic(profile: CategoryProfile, plots_dir: Path) -> None:
+def _preview_single_synthetic(profile: CategoryProfile, n_obs: int, plots_dir: Path) -> None:
     """Simulate category counts for one profile and save a plot."""
-    counts = make_category_counts(profile)
-    summary = profile_summary(profile)
+    counts = make_category_counts(profile, n_obs)
+    summary = profile_summary(profile, n_obs)
     print(
-        f"  {profile.tag}: n_obs={profile.n_obs:,}  k={profile.n_categories:,}  "
+        f"  {profile.tag}: n_obs={n_obs:,}  k={profile.n_categories:,}  "
         f"min={summary['min_group_size']:,}  max={summary['max_group_size']:,}  "
         f"imbalance={summary['imbalance_ratio']:.1f}x"
     )
@@ -476,19 +477,23 @@ def main(
         selected = list(DEFAULT_PREVIEW_APPEND_PROFILES)
 
     resolved_n_obs, resolved_n_vars, shape_source = _resolve_preview_shape(n_obs, n_vars)
-    if resolved_n_obs is not None:
-        selected = [profile.with_overrides(n_obs=resolved_n_obs) for profile in selected]
+    if resolved_n_obs is None:
+        click.echo(
+            "Error: synthetic previews now require n_obs from --n_obs or an available TAHOE_ZARR shape.",
+            err=True,
+        )
+        raise SystemExit(1)
     if resolved_n_vars is not None:
         selected = [profile.with_overrides(n_vars=resolved_n_vars) for profile in selected]
 
-    _print_profile_plan(selected, output_base, plots_dir, shape_source)
+    _print_profile_plan(selected, resolved_n_obs, output_base, plots_dir, shape_source)
 
     t_total = time.perf_counter()
     for i, profile in enumerate(selected, 1):
         print(f"\n{'=' * 60}")
         print(f"[{i}/{len(selected)}] Previewing profile: {profile.name}")
         print(f"{'=' * 60}")
-        _preview_single_synthetic(profile, plots_dir)
+        _preview_single_synthetic(profile, resolved_n_obs, plots_dir)
 
     tahoe_path = Path(TAHOE_ZARR) if TAHOE_ZARR else None
     if plot_all and tahoe_path is not None and tahoe_path.exists():

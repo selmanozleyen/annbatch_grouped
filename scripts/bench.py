@@ -9,7 +9,7 @@ Usage:
     python scripts/bench.py
     python scripts/bench.py --mode categorical --groupby_key cell_line_sorted
     python scripts/bench.py --mode random --mode categorical --mode scdataset
-    python scripts/bench.py --batch_size 4096 --chunk_size 512 --preload_nchunks 64
+    python scripts/bench.py --batch_size 4096 --chunk_size 64 --preload_nchunks 64
 """
 from __future__ import annotations
 
@@ -220,6 +220,19 @@ def _load_store_adata(store_path: str) -> ad.AnnData:
     return ad.AnnData(X=ad.io.sparse_dataset(g["X"]))
 
 
+class _ScDatasetCollection:
+    """Minimal adapter so scDataset can query length and rows."""
+
+    def __init__(self, matrix):
+        self.matrix = matrix
+
+    def __len__(self) -> int:
+        return int(self.matrix.shape[0])
+
+    def __getitem__(self, index):
+        return self.matrix[index]
+
+
 def _read_categorical_obs(store_path: str, groupby_key: str) -> tuple[np.ndarray, list[str]]:
     g = _open_store(store_path)
     if "obs" not in g:
@@ -350,7 +363,8 @@ def bench_scdataset(
     scDataset = scdataset_module.scDataset
     DataLoader = torch_utils_data.DataLoader
 
-    def _fetch_rows(matrix, indices):
+    def _fetch_rows(collection, indices):
+        matrix = collection.matrix if hasattr(collection, "matrix") else collection
         index_array = np.asarray(indices, dtype=np.int64)
         try:
             return matrix[index_array]
@@ -364,13 +378,14 @@ def bench_scdataset(
 
     def build_loader():
         adata = _load_store_adata(store_path)
+        collection = _ScDatasetCollection(adata.X)
         labels = _read_group_labels(store_path, groupby_key)
         sampler = ClassBalancedSampling(
             labels.tolist(),
             total_size=(warmup + n_batches) * batch_size,
         )
         dataset = scDataset(
-            adata.X,
+            collection,
             sampler,
             batch_size=batch_size,
             fetch_callback=_fetch_rows,
@@ -421,7 +436,7 @@ def bench_scdataset(
     help="Contiguous categorical obs column used by categorical mode.",
 )
 @click.option("--batch_size", type=int, default=4096)
-@click.option("--chunk_size", type=int, default=512)
+@click.option("--chunk_size", type=int, default=64)
 @click.option("--preload_nchunks", type=int, default=64)
 @click.option("--n_batches", type=int, default=500)
 @click.option("--warmup", type=int, default=0, help="Optional warmup batches before timing.")
@@ -441,7 +456,7 @@ def main(
     if experiment is None:
         experiment = datetime.now().strftime("manual_%Y%m%d_%H%M%S")
     if not modes:
-        modes = ("random", "categorical", "scdataset")
+        modes = ("random", "categorical")
     experiment_dir = os.path.join(output_root, experiment)
     os.makedirs(experiment_dir, exist_ok=True)
 

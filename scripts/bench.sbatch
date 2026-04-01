@@ -35,7 +35,7 @@ CMD=(python -u scripts/bench.py
     --groupby_key "$GROUPBY_KEY"
     --experiment "$EXPERIMENT"
     --batch_size 4096
-    --chunk_size 512
+    --chunk_size 64
     --preload_nchunks 64
     --n_batches 500
 )

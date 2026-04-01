@@ -8,6 +8,7 @@ from annbatch_grouped.data_gen import (
     MANY_CATEGORIES_EXPONENTIAL,
     MANY_CATEGORIES_LINEAR,
     UNIFORM_10K,
+    UNIFORM_1M,
     UNIFORM_100K,
     ZIPF_1K,
     CategoryProfile,
@@ -28,6 +29,7 @@ DEFAULT_PREVIEW_APPEND_PROFILES: tuple[CategoryProfile, ...] = (
     MANY_CATEGORIES_EXPONENTIAL,
     UNIFORM_10K,
     UNIFORM_100K,
+    UNIFORM_1M,
 )
 
 DEFAULT_APPEND_REAL_COLUMNS: tuple[ObsColumnPlan, ...] = (

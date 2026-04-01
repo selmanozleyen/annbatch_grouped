@@ -14,7 +14,7 @@ from annbatch_grouped.default_profile_lists import (
     DEFAULT_PREVIEW_APPEND_PROFILES,
 )
 
-DEFAULT_MODES = ("random", "categorical", "scdataset")
+DEFAULT_MODES = ("random", "categorical")
 GROUPBY_MODES = ("categorical", "scdataset")
 
 

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 import json
 from pathlib import Path
 import shutil
@@ -59,14 +59,14 @@ def _combined_counts(obs: pd.DataFrame, left: str, right: str) -> tuple[list[str
     return counts.index.tolist(), counts.to_numpy(dtype=np.int64)
 
 
-def _synthetic_profiles(n_obs: int):
-    return [replace(profile, n_obs=n_obs) for profile in DEFAULT_PREVIEW_APPEND_PROFILES]
+def _synthetic_profiles():
+    return list(DEFAULT_PREVIEW_APPEND_PROFILES)
 
 
 def _synthetic_plan(n_obs: int) -> list[PlanEntry]:
     plan: list[PlanEntry] = []
-    for profile in _synthetic_profiles(n_obs):
-        counts = make_category_counts(profile)
+    for profile in _synthetic_profiles():
+        counts = make_category_counts(profile, n_obs)
         categories = _prefixed_categories(profile.name, profile.n_categories)
         plan.append(
             PlanEntry(

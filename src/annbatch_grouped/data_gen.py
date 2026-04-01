@@ -26,8 +26,6 @@ class CategoryProfile:
     ----------
     name
         Human-readable identifier for this profile.
-    n_obs
-        Total number of observations.
     n_vars
         Number of features/genes.
     n_categories
@@ -57,12 +55,13 @@ class CategoryProfile:
     custom_weights
         Explicit per-category weights (will be normalized). Only used when
         distribution="custom".
+    min_category_size
+        Minimum number of observations assigned to each category.
     seed
         Random seed for reproducibility.
     """
 
     name: str
-    n_obs: int
     n_vars: int
     n_categories: int
     distribution: DistributionType = "uniform"
@@ -72,6 +71,7 @@ class CategoryProfile:
     dominant_fraction: float = 0.5
     geometric_ratio: float = 0.8
     custom_weights: tuple[float, ...] | None = None
+    min_category_size: int = 1
     tag_override: str | None = None
     seed: int = 42
 
@@ -84,14 +84,13 @@ class CategoryProfile:
         """Display tag for plots and logs."""
         if self.tag_override is not None:
             return self.tag_override
-        return f"k{self.n_categories}_{self.distribution}"
+        return self.name
 
 
 # ---------------------------------------------------------------------------
 # Predefined profiles
 # ---------------------------------------------------------------------------
 
-DEFAULT_SYNTHETIC_N_OBS = 10_000_000
 DEFAULT_SYNTHETIC_N_VARS = 2_000
 TAHOE_LIKE_N_VARS = 62_714
 
@@ -101,7 +100,6 @@ def _profile(
     *,
     n_categories: int,
     distribution: DistributionType,
-    n_obs: int = DEFAULT_SYNTHETIC_N_OBS,
     n_vars: int = DEFAULT_SYNTHETIC_N_VARS,
     tag_override: str | None = None,
     **kwargs,
@@ -109,7 +107,6 @@ def _profile(
     """Build a profile with shared synthetic defaults."""
     return CategoryProfile(
         name=name,
-        n_obs=n_obs,
         n_vars=n_vars,
         n_categories=n_categories,
         distribution=distribution,
@@ -120,7 +117,6 @@ def _profile(
 
 TAHOE_LIKE = _profile(
     "tahoe_like_cellline",
-    n_obs=DEFAULT_SYNTHETIC_N_OBS,
     n_vars=TAHOE_LIKE_N_VARS,
     n_categories=50,
     distribution="zipf",
@@ -148,7 +144,7 @@ ZIPF_1K = _profile(
 )
 
 UNIFORM_1K = _profile(
-    "uniform_1k",
+    "uniform_1k_cats",
     n_categories=1_000,
     distribution="uniform",
 )
@@ -160,7 +156,7 @@ UNIFORM_10K = _profile(
 )
 
 ZIPF_100K = _profile(
-    "zipf_100k",
+    "zipf_100k_cats",
     n_categories=100_000,
     distribution="zipf",
     zipf_exponent=1.5,
@@ -169,6 +165,12 @@ ZIPF_100K = _profile(
 UNIFORM_100K = _profile(
     "uniform_100k_cats",
     n_categories=100_000,
+    distribution="uniform",
+)
+
+UNIFORM_1M = _profile(
+    "uniform_1m_cats",
+    n_categories=1_000_000,
     distribution="uniform",
 )
 
@@ -183,6 +185,7 @@ MANY_CATEGORIES_LINEAR = _profile(
     "linear_1k_cats",
     n_categories=1_000,
     distribution="linear",
+    min_category_size=64,
 )
 
 MANY_CATEGORIES_EXPONENTIAL = _profile(
@@ -190,6 +193,7 @@ MANY_CATEGORIES_EXPONENTIAL = _profile(
     n_categories=1_000,
     distribution="geometric",
     geometric_ratio=0.99,
+    min_category_size=64,
 )
 
 SINGLE_DOMINANT = _profile(
@@ -216,6 +220,7 @@ ALL_PROFILES: list[CategoryProfile] = [
     UNIFORM_10K,
     ZIPF_100K,
     UNIFORM_100K,
+    UNIFORM_1M,
     ZIPF_REALISTIC,
     MANY_CATEGORIES_LINEAR,
     MANY_CATEGORIES_EXPONENTIAL,
@@ -229,18 +234,23 @@ ALL_PROFILES: list[CategoryProfile] = [
 # ---------------------------------------------------------------------------
 
 
-def make_category_counts(profile: CategoryProfile) -> np.ndarray:
+def make_category_counts(profile: CategoryProfile, n_obs: int) -> np.ndarray:
     """Compute per-category observation counts from a profile.
 
     Returns an integer array of length `n_categories` that sums to `n_obs`.
     """
-    n = profile.n_obs
+    n = n_obs
     k = profile.n_categories
+    min_count = profile.min_category_size
 
     if k <= 0:
         raise ValueError(f"n_categories must be >= 1, got {k}")
-    if n < k:
-        raise ValueError(f"n_obs ({n}) must be >= n_categories ({k}) so every category gets at least one observation")
+    if min_count < 0:
+        raise ValueError(f"min_category_size must be >= 0, got {min_count}")
+    if n < k * min_count:
+        raise ValueError(
+            f"n_obs ({n}) must be >= n_categories ({k}) * min_category_size ({min_count})"
+        )
 
     if profile.distribution == "uniform":
         weights = np.ones(k)
@@ -277,19 +287,29 @@ def make_category_counts(profile: CategoryProfile) -> np.ndarray:
 
     if np.any(weights < 0):
         raise ValueError("Weights must be non-negative")
+
+    if profile.distribution in {"geometric", "linear"} and min_count > 0:
+        weights = weights - weights.min()
+
     total = weights.sum()
     if total == 0:
         raise ValueError("Weights must not all be zero")
 
-    # Normalize to probabilities, then convert to integer counts.
-    # Use largest-remainder method so the sum is exact.
+    counts = np.full(k, min_count, dtype=np.int64)
+    remainder_n = n - counts.sum()
+    if remainder_n == 0:
+        return counts
+
+    # Normalize to probabilities, then convert remaining observations to
+    # integer counts with the largest-remainder method so the sum is exact.
     probs = weights / total
-    raw = probs * n
-    counts = np.floor(raw).astype(np.int64)
-    remainder = n - counts.sum()
-    fractional_parts = raw - counts
+    raw = probs * remainder_n
+    extra = np.floor(raw).astype(np.int64)
+    remainder = remainder_n - extra.sum()
+    fractional_parts = raw - extra
     top_indices = np.argsort(-fractional_parts)[: int(remainder)]
-    counts[top_indices] += 1
+    extra[top_indices] += 1
+    counts += extra
 
     assert counts.sum() == n, f"Bug: counts sum to {counts.sum()}, expected {n}"
     assert np.all(counts >= 0), "Bug: negative counts"
@@ -297,7 +317,7 @@ def make_category_counts(profile: CategoryProfile) -> np.ndarray:
     return counts
 
 
-def generate_adata(profile: CategoryProfile) -> ad.AnnData:
+def generate_adata(profile: CategoryProfile, n_obs: int) -> ad.AnnData:
     """Generate a synthetic AnnData from a CategoryProfile.
 
     Returns an in-memory AnnData with:
@@ -307,14 +327,14 @@ def generate_adata(profile: CategoryProfile) -> ad.AnnData:
     - obs_names: "cell_0" ... "cell_{n_obs-1}"
     """
     rng = np.random.default_rng(profile.seed)
-    counts = make_category_counts(profile)
+    counts = make_category_counts(profile, n_obs)
 
     # Build sparse X in row-chunks to avoid allocating a flat index
     # array of size n_obs * n_vars * density (can be TiBs for large matrices).
     CHUNK = 200_000
     chunks = []
-    for row_start in range(0, profile.n_obs, CHUNK):
-        row_end = min(row_start + CHUNK, profile.n_obs)
+    for row_start in range(0, n_obs, CHUNK):
+        row_end = min(row_start + CHUNK, n_obs)
         n_rows = row_end - row_start
         chunk = sp.random(
             n_rows,
@@ -335,7 +355,7 @@ def generate_adata(profile: CategoryProfile) -> ad.AnnData:
 
     obs = pd.DataFrame(
         {profile.groupby_key: labels.astype(str)},
-        index=[f"cell_{i}" for i in range(profile.n_obs)],
+        index=[f"cell_{i}" for i in range(n_obs)],
     )
 
     var = pd.DataFrame(
@@ -345,14 +365,14 @@ def generate_adata(profile: CategoryProfile) -> ad.AnnData:
     return ad.AnnData(X=X, obs=obs, var=var)
 
 
-def estimate_dataset_size(profile: CategoryProfile) -> dict:
+def estimate_dataset_size(profile: CategoryProfile, n_obs: int) -> dict:
     """Estimate in-memory and on-disk sizes for a profile (no data generated).
 
     Returns a dict with byte counts and human-readable strings.
     """
-    nnz = int(profile.n_obs * profile.n_vars * profile.density)
-    sparse_bytes = nnz * 4 + (nnz + profile.n_obs + 1) * 4
-    obs_bytes = profile.n_obs * 20
+    nnz = int(n_obs * profile.n_vars * profile.density)
+    sparse_bytes = nnz * 4 + (nnz + n_obs + 1) * 4
+    obs_bytes = n_obs * 20
     mem_bytes = sparse_bytes + obs_bytes
 
     # LZ4 on random floats typically achieves ~60-70% of original;
@@ -528,13 +548,13 @@ def read_obs_lazy(path: str | Path) -> tuple[pd.DataFrame, tuple[int, int]]:
     return obs, (obs.shape[0], n_vars)
 
 
-def profile_summary(profile: CategoryProfile) -> dict:
+def profile_summary(profile: CategoryProfile, n_obs: int) -> dict:
     """Compute summary statistics for a profile without generating data."""
-    counts = make_category_counts(profile)
+    counts = make_category_counts(profile, n_obs)
     return {
         "name": profile.name,
         "tag": profile.tag,
-        "n_obs": profile.n_obs,
+        "n_obs": n_obs,
         "n_vars": profile.n_vars,
         "n_categories": profile.n_categories,
         "distribution": profile.distribution,
