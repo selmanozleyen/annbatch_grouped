@@ -8,7 +8,7 @@ Reads experiment directories produced by launch_indexing_bench.py:
 
 The plotter pools every per-repeat JSON it finds for a given combo, so a sweep
 launched with --repeats=3 contributes three samples_per_sec values per
-(chunk_size, preload_nchunks, batch_size, indexing_mode) point.
+(zarr_backend, chunk_size, preload_nchunks, batch_size, indexing_mode) point.
 
 For every combo that has both indexing modes recorded we build:
 
@@ -34,6 +34,7 @@ import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import click
 import matplotlib
@@ -49,17 +50,16 @@ from annbatch_grouped.paths import DATA_DIR, RESULTS_DIR
 sns.set_theme(style="whitegrid", context="notebook")
 
 INDEXING_MODES = ("slice", "integer")
-# Match both legacy "<parent>__csX_pnY_<mode>" and current "<parent>__csX_pnY_bsZ_<mode>".
-# Older runs that did not encode batch_size fall back to the canonical bs=4096.
+# Matches legacy "<parent>__csX...", current "<parent>__csX..._bsZ...", and backend "<parent>__zbY__csX..."
 EXPERIMENT_RE = re.compile(
-    r"^(?P<parent>.+?)__cs(?P<cs>\d+)_pn(?P<pn>\d+)(?:_bs(?P<bs>\d+))?_(?P<mode>slice|integer)$"
+    r"^(?P<parent>.+?)(?:__zb(?P<zb>[\w-]+))?__cs(?P<cs>\d+)_pn(?P<pn>\d+)(?:_bs(?P<bs>\d+))?_(?P<mode>slice|integer)$"
 )
 LEGACY_BATCH_SIZE = 4096
 
 
 @dataclass(frozen=True)
 class RepeatSample:
-    """A single successful repeat of a (cs, pn, bs, mode) combo."""
+    """A single successful repeat of a (backend, cs, pn, bs, mode) combo."""
     repeat_index: int  # 1-based; 0 if unknown (legacy single-file runs)
     samples_per_sec: float
     total_time_s: float
@@ -68,6 +68,7 @@ class RepeatSample:
 
 @dataclass(frozen=True)
 class Point:
+    zarr_backend: str
     chunk_size: int
     preload_nchunks: int
     batch_size: int
@@ -83,12 +84,7 @@ class Point:
 
 
 def _iter_repeat_samples(payload: dict) -> list[RepeatSample]:
-    """Pull every successful repeat record out of a single bench.py JSON payload.
-
-    bench.py stores one Slurm array task per file with a single-element repeats
-    list, but legacy single-task files may also have a top-level metrics dict
-    instead of a repeats list. This handles both.
-    """
+    """Pull every successful repeat record out of a single bench.py JSON payload."""
     samples: list[RepeatSample] = []
     repeats = payload.get("repeats")
     if isinstance(repeats, list) and repeats:
@@ -154,9 +150,7 @@ def _collect_points(experiment_root: Path, parent_experiment: str) -> list[Point
         runs_dir = child / "runs"
         if not runs_dir.exists():
             continue
-        # Match every per-repeat random-mode file:
-        #   `<key>__random.json`            (single-repeat, legacy)
-        #   `<key>__random__rNNN.json`      (one per Slurm array task)
+        
         run_files = sorted(runs_dir.glob("*__random*.json"))
         if not run_files:
             continue
@@ -192,6 +186,9 @@ def _collect_points(experiment_root: Path, parent_experiment: str) -> list[Point
             continue
 
         bs_str = match.group("bs")
+        zb_str = match.group("zb")
+        backend = zb_str if zb_str else "zarr-python"
+        
         if recorded_bs <= 0:
             recorded_bs = int(bs_str) if bs_str else LEGACY_BATCH_SIZE
 
@@ -200,6 +197,7 @@ def _collect_points(experiment_root: Path, parent_experiment: str) -> list[Point
         nb_arr = np.asarray([s.n_batches for s in repeats_pool], dtype=np.float64)
         points.append(
             Point(
+                zarr_backend=backend,
                 chunk_size=int(match.group("cs")),
                 preload_nchunks=int(match.group("pn")),
                 batch_size=recorded_bs,
@@ -219,45 +217,54 @@ def _collect_points(experiment_root: Path, parent_experiment: str) -> list[Point
 
 @dataclass(frozen=True)
 class GridLayout:
-    """Resolved heatmap layout. Each layer becomes one row of (slice, integer, ratio) panels."""
+    """Resolved heatmap layout."""
     x_label: str
     y_label: str
-    layer_label: str  # e.g. "chunk_size" -- empty if there is only one layer.
-    layer_values: list[int]  # one entry per stacked heatmap row
+    layer_label: str  
+    layer_values: list[tuple]  # one entry per stacked heatmap row
     x_values: list[int]
     y_values: list[int]
-    grids: dict[tuple[int, str], np.ndarray]  # (layer_value, indexing_mode) -> 2D grid (y, x)
+    grids: dict[tuple[tuple, str], np.ndarray]  # (layer_value, indexing_mode) -> 2D grid
 
 
 def _resolve_layout(points: list[Point]) -> GridLayout:
+    backends = sorted({point.zarr_backend for point in points})
     chunk_sizes = sorted({point.chunk_size for point in points})
     batch_sizes = sorted({point.batch_size for point in points})
     preload_nchunks = sorted({point.preload_nchunks for point in points})
 
+    zb_varies = len(backends) > 1
     cs_varies = len(chunk_sizes) > 1
     bs_varies = len(batch_sizes) > 1
 
     if cs_varies and bs_varies:
-        layer_label = "chunk_size"
-        layer_values = chunk_sizes
+        layer_dim_names = ["chunk_size"]
         x_label = "batch_size"
         x_values = batch_sizes
     elif bs_varies:
-        layer_label = ""
-        layer_values = chunk_sizes  # single value, layered trivially
+        layer_dim_names = []
         x_label = "batch_size"
         x_values = batch_sizes
     else:
-        # cs varies (or both single): legacy layout.
-        layer_label = ""
-        layer_values = batch_sizes  # single value, layered trivially
+        layer_dim_names = []
         x_label = "chunk_size"
         x_values = chunk_sizes
 
+    if zb_varies:
+        layer_dim_names.insert(0, "backend")
+
+    def get_layer(pt: Point) -> tuple:
+        vals = []
+        if "backend" in layer_dim_names: vals.append(pt.zarr_backend)
+        if "chunk_size" in layer_dim_names: vals.append(pt.chunk_size)
+        return tuple(vals) if vals else ("default",)
+
+    layer_values = sorted({get_layer(pt) for pt in points})
+    layer_label = ", ".join(layer_dim_names)
     y_label = "preload_nchunks"
     y_values = preload_nchunks
 
-    grids: dict[tuple[int, str], np.ndarray] = {}
+    grids: dict[tuple[tuple, str], np.ndarray] = {}
     for layer in layer_values:
         for mode in INDEXING_MODES:
             grids[(layer, mode)] = np.full((len(y_values), len(x_values)), np.nan, dtype=np.float64)
@@ -265,17 +272,12 @@ def _resolve_layout(points: list[Point]) -> GridLayout:
     for point in points:
         if point.indexing_mode not in INDEXING_MODES:
             continue
-        if layer_label == "chunk_size":
-            layer = point.chunk_size
-        elif x_label == "batch_size":
-            layer = chunk_sizes[0]
-        else:
-            layer = batch_sizes[0]
         x_val = point.batch_size if x_label == "batch_size" else point.chunk_size
         if x_val not in x_values or point.preload_nchunks not in y_values:
             continue
         col = x_values.index(x_val)
         row = y_values.index(point.preload_nchunks)
+        layer = get_layer(point)
         grids[(layer, point.indexing_mode)][row, col] = point.samples_per_sec
 
     return GridLayout(
@@ -290,11 +292,13 @@ def _resolve_layout(points: list[Point]) -> GridLayout:
 
 
 def _fixed_dims_suffix(points: list[Point]) -> str:
-    """Return ' | cs=1, bs=4096, pn=32768 (fixed)' style suffix for axes that do not vary."""
+    backends = sorted({point.zarr_backend for point in points})
     chunk_sizes = sorted({point.chunk_size for point in points})
     batch_sizes = sorted({point.batch_size for point in points})
     preload_nchunks = sorted({point.preload_nchunks for point in points})
     fixed: list[str] = []
+    if len(backends) == 1:
+        fixed.append(f"backend={backends[0]}")
     if len(chunk_sizes) == 1:
         fixed.append(f"chunk_size={chunk_sizes[0]}")
     if len(batch_sizes) == 1:
@@ -312,7 +316,6 @@ def _annotate_heatmap(ax, matrix: np.ndarray, fmt: str, norm) -> None:
             if np.isnan(value):
                 ax.text(c, r, "n/a", ha="center", va="center", fontsize=9, color="#64748b")
                 continue
-            # Pick text color so it stays readable on dark cells of viridis-style colormaps.
             normalized = float(norm(value)) if norm is not None else 0.5
             color = "white" if normalized < 0.55 else "#0f172a"
             ax.text(c, r, fmt.format(value), ha="center", va="center", fontsize=9, color=color)
@@ -337,10 +340,8 @@ def _plot_heatmap_summary(points: list[Point], output: Path, parent_experiment: 
                           cpu_constraints: list[str]) -> None:
     layout = _resolve_layout(points)
 
-    # Compute global throughput norm and ratio norm across every layer so the
-    # color scales remain comparable when stacking small multiples.
     all_finite_throughput: list[float] = []
-    ratios_per_layer: dict[int, np.ndarray] = {}
+    ratios_per_layer: dict[tuple, np.ndarray] = {}
     for layer in layout.layer_values:
         slice_grid = layout.grids[(layer, "slice")]
         integer_grid = layout.grids[(layer, "integer")]
@@ -364,7 +365,6 @@ def _plot_heatmap_summary(points: list[Point], output: Path, parent_experiment: 
     if all_finite_ratio.size == 0:
         ratio_extent = 1.0
     else:
-        # Symmetric log-ratio so 1.0 is centered.
         ratio_extent = max(float(np.max(np.abs(np.log2(all_finite_ratio)))), 0.05)
     ratio_norm = colors.Normalize(vmin=-ratio_extent, vmax=ratio_extent)
 
@@ -384,7 +384,8 @@ def _plot_heatmap_summary(points: list[Point], output: Path, parent_experiment: 
         integer_grid = layout.grids[(layer, "integer")]
         ratio = ratios_per_layer[layer]
 
-        layer_suffix = f" -- {layout.layer_label}={layer}" if layout.layer_label else ""
+        layer_str = ", ".join(str(v) for v in layer) if layer != ("default",) else ""
+        layer_suffix = f" -- {layout.layer_label}={layer_str}" if layout.layer_label and layer_str else ""
 
         _heatmap(
             axes[row_idx, 0], slice_grid,
@@ -441,31 +442,29 @@ def _plot_heatmap_summary(points: list[Point], output: Path, parent_experiment: 
 
 def _plot_lines(points: list[Point], output: Path, parent_experiment: str,
                 cpu_constraints: list[str]) -> None:
-    """Two-panel line plot: throughput vs preload_nchunks, plus integer/slice ratio.
-
-    Lines are paired (slice solid / integer dashed) and share a color per
-    (chunk_size, batch_size) combo, so the eye reads "same color, dashed
-    above solid" as "integer wins for this configuration".
-    """
+    backends = sorted({point.zarr_backend for point in points})
     chunk_sizes = sorted({point.chunk_size for point in points})
     batch_sizes = sorted({point.batch_size for point in points})
 
-    by_combo: dict[tuple[int, int, str], list[tuple[int, float]]] = {}
+    by_combo: dict[tuple[str, int, int, str], list[tuple[int, float]]] = {}
     for point in points:
-        key = (point.chunk_size, point.batch_size, point.indexing_mode)
+        key = (point.zarr_backend, point.chunk_size, point.batch_size, point.indexing_mode)
         by_combo.setdefault(key, []).append((point.preload_nchunks, point.samples_per_sec))
     for key, values in list(by_combo.items()):
         by_combo[key] = sorted(values)
 
-    combo_keys = sorted({(cs, bs) for cs, bs, _ in by_combo})
+    combo_keys = sorted({(zb, cs, bs) for zb, cs, bs, _ in by_combo})
     palette = sns.color_palette("husl", max(len(combo_keys), 1))
-    color_for: dict[tuple[int, int], tuple] = {key: palette[i] for i, key in enumerate(combo_keys)}
+    color_for: dict[tuple[str, int, int], tuple] = {key: palette[i] for i, key in enumerate(combo_keys)}
 
+    zb_varies = len(backends) > 1
     cs_varies = len(chunk_sizes) > 1
     bs_varies = len(batch_sizes) > 1
 
-    def _label(cs: int, bs: int, mode: str | None = None) -> str:
+    def _label(zb: str, cs: int, bs: int, mode: str | None = None) -> str:
         bits: list[str] = []
+        if zb_varies:
+            bits.append(f"zb={zb}")
         if cs_varies:
             bits.append(f"cs={cs}")
         if bs_varies:
@@ -477,16 +476,16 @@ def _plot_lines(points: list[Point], output: Path, parent_experiment: str,
     fig, axes = plt.subplots(1, 2, figsize=(14, 5.6), constrained_layout=True)
 
     ax_abs = axes[0]
-    for cs, bs in combo_keys:
-        color = color_for[(cs, bs)]
+    for zb, cs, bs in combo_keys:
+        color = color_for[(zb, cs, bs)]
         for mode, ls in (("slice", "-"), ("integer", "--")):
-            data = by_combo.get((cs, bs, mode))
+            data = by_combo.get((zb, cs, bs, mode))
             if not data:
                 continue
             xs = [pn for pn, _ in data]
             ys = [sps for _, sps in data]
             ax_abs.plot(xs, ys, marker="o", linestyle=ls, color=color,
-                        label=_label(cs, bs, mode))
+                        label=_label(zb, cs, bs, mode))
     ax_abs.set_xscale("log", base=2)
     ax_abs.set_xlabel("preload_nchunks")
     ax_abs.set_ylabel("samples/sec")
@@ -496,16 +495,16 @@ def _plot_lines(points: list[Point], output: Path, parent_experiment: str,
 
     ax_ratio = axes[1]
     plotted_ratio = False
-    for cs, bs in combo_keys:
-        color = color_for[(cs, bs)]
-        slice_dict = dict(by_combo.get((cs, bs, "slice"), []))
-        integer_dict = dict(by_combo.get((cs, bs, "integer"), []))
+    for zb, cs, bs in combo_keys:
+        color = color_for[(zb, cs, bs)]
+        slice_dict = dict(by_combo.get((zb, cs, bs, "slice"), []))
+        integer_dict = dict(by_combo.get((zb, cs, bs, "integer"), []))
         common_pn = sorted(set(slice_dict) & set(integer_dict))
         if not common_pn:
             continue
         ratios = [integer_dict[pn] / slice_dict[pn] for pn in common_pn]
         ax_ratio.plot(common_pn, ratios, marker="o", color=color,
-                      label=_label(cs, bs))
+                      label=_label(zb, cs, bs))
         plotted_ratio = True
     ax_ratio.axhline(1.0, color="#475569", linestyle=":", linewidth=1)
     ax_ratio.set_xscale("log", base=2)
@@ -528,40 +527,28 @@ def _plot_lines(points: list[Point], output: Path, parent_experiment: str,
 
 def _plot_boxplot(points: list[Point], output: Path, parent_experiment: str,
                   cpu_constraints: list[str]) -> None:
-    """Two-panel comparison per chunk_size:
-
-    * Left: matplotlib boxplot of samples/sec per chunk_size, slice and integer
-      side by side. Each box pools every per-repeat sample we collected for
-      that (chunk_size, indexing_mode); individual repeats are overlaid as
-      jittered dots so small N stays visible.
-    * Right: paired integer/slice speedup per chunk_size. We pair by
-      repeat_index (launch_indexing_bench.py shares seeds across modes via
-      --repeat_index, so per-repeat ratios are meaningful). Bars show the
-      mean ratio; whiskers show the [min, max] across paired repeats; the
-      mean(integer)/mean(slice) ratio is annotated above each bar.
-    """
     if not points:
         return
 
-    chunk_sizes = sorted({point.chunk_size for point in points})
-    by_combo: dict[tuple[int, str], Point] = {}
+    backends = sorted({point.zarr_backend for point in points})
+    combo_keys = sorted({(point.zarr_backend, point.chunk_size) for point in points})
+
+    by_combo: dict[tuple[str, int, str], Point] = {}
     for point in points:
         if point.indexing_mode not in INDEXING_MODES:
             continue
-        # If a sweep covered multiple (bs, pn) per chunk_size we just take the
-        # last one we saw -- the launcher's default sweep fixes both.
-        by_combo[(point.chunk_size, point.indexing_mode)] = point
+        by_combo[(point.zarr_backend, point.chunk_size, point.indexing_mode)] = point
 
-    # Boxplot data: one list of samples_per_sec per (cs, mode) cell.
     box_data: list[list[float]] = []
     box_positions: list[float] = []
     box_colors: list[str] = []
     box_labels: list[str] = []
     mode_to_color = {"slice": "#1f77b4", "integer": "#d62728"}
     width = 0.36
-    for i, cs in enumerate(chunk_sizes):
+    
+    for i, (zb, cs) in enumerate(combo_keys):
         for j, mode in enumerate(INDEXING_MODES):
-            point = by_combo.get((cs, mode))
+            point = by_combo.get((zb, cs, mode))
             if point is None or not point.samples_per_sec_repeats:
                 continue
             offset = (j - 0.5) * (width + 0.05)
@@ -599,9 +586,13 @@ def _plot_boxplot(points: list[Point], output: Path, parent_experiment: str,
             xs = position + rng.uniform(-width * 0.18, width * 0.18, size=len(samples))
         ax_box.scatter(xs, samples, s=18, color=color, edgecolor="#0f172a", linewidth=0.6, zorder=3)
 
-    ax_box.set_xticks(range(len(chunk_sizes)))
-    ax_box.set_xticklabels([str(cs) for cs in chunk_sizes])
-    ax_box.set_xlabel("chunk_size")
+    ax_box.set_xticks(range(len(combo_keys)))
+    xtick_labels = []
+    for zb, cs in combo_keys:
+        if len(backends) > 1: xtick_labels.append(f"{zb}\ncs={cs}")
+        else: xtick_labels.append(str(cs))
+    ax_box.set_xticklabels(xtick_labels)
+    ax_box.set_xlabel("chunk_size / backend")
     ax_box.set_ylabel("samples/sec")
     ax_box.set_title("Throughput by chunk_size (slice vs integer)", fontsize=12, fontweight="bold")
     ax_box.grid(True, axis="y", alpha=0.3)
@@ -612,16 +603,15 @@ def _plot_boxplot(points: list[Point], output: Path, parent_experiment: str,
     ]
     ax_box.legend(handles=legend_handles, loc="best", frameon=True)
 
-    # Right panel: paired integer/slice speedup per chunk_size.
     ax_spd = axes[1]
-    speedup_x: list[int] = []
+    speedup_x: list[str] = []
     speedup_means: list[float] = []
     speedup_low: list[float] = []
     speedup_high: list[float] = []
     speedup_labels: list[str] = []
-    for cs in chunk_sizes:
-        slice_point = by_combo.get((cs, "slice"))
-        integer_point = by_combo.get((cs, "integer"))
+    for zb, cs in combo_keys:
+        slice_point = by_combo.get((zb, cs, "slice"))
+        integer_point = by_combo.get((zb, cs, "integer"))
         if slice_point is None or integer_point is None:
             continue
         slice_by_idx: dict[int, list[float]] = {}
@@ -638,14 +628,13 @@ def _plot_boxplot(points: list[Point], output: Path, parent_experiment: str,
                 for idx in common_indices
             ]
         else:
-            # Fall back to mean/mean if we don't have repeat_index alignment.
             ratios = [integer_point.samples_per_sec / slice_point.samples_per_sec]
 
         ratios_arr = np.asarray(ratios, dtype=np.float64)
         mean_ratio = (
             float(integer_point.samples_per_sec) / float(slice_point.samples_per_sec)
         )
-        speedup_x.append(cs)
+        speedup_x.append(f"{zb}\ncs={cs}" if len(backends) > 1 else str(cs))
         speedup_means.append(mean_ratio)
         speedup_low.append(float(np.min(ratios_arr)))
         speedup_high.append(float(np.max(ratios_arr)))
@@ -672,12 +661,11 @@ def _plot_boxplot(points: list[Point], output: Path, parent_experiment: str,
                 xytext=(0, 4), textcoords="offset points",
             )
         ax_spd.set_xticks(x)
-        ax_spd.set_xticklabels([str(cs) for cs in speedup_x])
-        ax_spd.set_xlabel("chunk_size")
+        ax_spd.set_xticklabels(speedup_x)
+        ax_spd.set_xlabel("chunk_size / backend")
         ax_spd.set_ylabel("speedup (integer / slice)")
         ax_spd.set_title("Paired speedup integer / slice", fontsize=12, fontweight="bold")
         ax_spd.grid(True, axis="y", alpha=0.3)
-        # Headroom for annotations.
         ymax = max(speedup_high + [1.0])
         ax_spd.set_ylim(0, ymax * 1.18)
     else:
@@ -698,12 +686,9 @@ def _plot_boxplot(points: list[Point], output: Path, parent_experiment: str,
 
 def _plot_trace_gallery(points: list[Point], output: Path, parent_experiment: str,
                         cpu_constraints: list[str]) -> None:
-    # Build one row per unique (cs, bs, pn) combo. Sort by (cs, bs, pn) so rows
-    # group naturally by chunk_size and batch_size when those sweep dimensions
-    # are in play.
-    triples = sorted({(point.chunk_size, point.batch_size, point.preload_nchunks) for point in points})
-    by_combo: dict[tuple[int, int, int, str], Point] = {
-        (point.chunk_size, point.batch_size, point.preload_nchunks, point.indexing_mode): point
+    quads = sorted({(point.zarr_backend, point.chunk_size, point.batch_size, point.preload_nchunks) for point in points})
+    by_combo: dict[tuple[str, int, int, int, str], Point] = {
+        (point.zarr_backend, point.chunk_size, point.batch_size, point.preload_nchunks, point.indexing_mode): point
         for point in points
     }
 
@@ -717,10 +702,11 @@ def _plot_trace_gallery(points: list[Point], output: Path, parent_experiment: st
     max_sps = float(max(finite_sps)) * 1.1
     max_elapsed = float(max(finite_elapsed)) * 1.02
 
-    chunk_varies = len({cs for cs, _, _ in triples}) > 1
-    bs_varies = len({bs for _, bs, _ in triples}) > 1
+    zb_varies = len({zb for zb, _, _, _ in quads}) > 1
+    chunk_varies = len({cs for _, cs, _, _ in quads}) > 1
+    bs_varies = len({bs for _, _, bs, _ in quads}) > 1
 
-    nrows = max(len(triples), 1)
+    nrows = max(len(quads), 1)
     fig, axes = plt.subplots(
         nrows=nrows,
         ncols=2,
@@ -731,13 +717,14 @@ def _plot_trace_gallery(points: list[Point], output: Path, parent_experiment: st
     if nrows == 1:
         axes = np.asarray([axes])
 
-    for row_idx, (chunk_size, batch_size, preload) in enumerate(triples):
+    for row_idx, (backend, chunk_size, batch_size, preload) in enumerate(quads):
         for col_idx, mode in enumerate(INDEXING_MODES):
             ax = axes[row_idx, col_idx]
-            point = by_combo.get((chunk_size, batch_size, preload, mode))
+            point = by_combo.get((backend, chunk_size, batch_size, preload, mode))
             if col_idx == 0:
-                # Only show axes that actually vary in this run, plus pn (always varies).
                 label_bits = [f"pn={preload}"]
+                if zb_varies:
+                    label_bits.append(f"zb={backend}")
                 if chunk_varies:
                     label_bits.append(f"cs={chunk_size}")
                 if bs_varies:
@@ -769,7 +756,7 @@ def _plot_trace_gallery(points: list[Point], output: Path, parent_experiment: st
     title = f"Indexing mode throughput traces: {parent_experiment}{_fixed_dims_suffix(points)}"
     if cpu_constraints:
         title += f" | CPU: {', '.join(cpu_constraints)}"
-    fig.suptitle(title, fontsize=14, fontweight="bold")
+    fig.suptitle(title, fontweight="bold")
     fig.tight_layout(rect=[0, 0, 1, 0.97])
     output.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output, dpi=170, bbox_inches="tight")

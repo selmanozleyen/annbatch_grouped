@@ -30,6 +30,8 @@ CPU_CONSTRAINT="${9:-${SLURM_JOB_CONSTRAINTS:-}}"
 # 10th positional arg: wall-clock cap in seconds for the timed loop. Empty string
 # (the default) means "no cap"; the timed loop only stops at N_BATCHES.
 MAX_SECONDS="${10:-}"
+# 11th positional arg: codec backend. zarrs-python is configured strict in bench.py.
+ZARR_BACKEND="${11:-zarr-python}"
 
 REPEAT_INDEX="${SLURM_ARRAY_TASK_ID:-1}"
 
@@ -41,6 +43,7 @@ fi
 # This MUST be exported BEFORE running bench.py, because annbatch reads it at
 # module import time. See annbatch/loader.py::_INDEXING_MODE for details.
 export ANNBATCH_INDEXING_MODE="$INDEXING_MODE"
+export ANNBATCH_ZARR_BACKEND="$ZARR_BACKEND"
 
 echo "=== Job info ==="
 echo "Job ID:          $SLURM_JOB_ID"
@@ -55,6 +58,7 @@ echo "Started:         $(date)"
 echo "Mem alloc:       ${SLURM_MEM_PER_NODE}MB"
 echo "CPUs:            $SLURM_CPUS_PER_TASK"
 echo "Indexing mode:   $ANNBATCH_INDEXING_MODE"
+echo "Zarr backend:    $ANNBATCH_ZARR_BACKEND"
 echo "chunk_size:      $CHUNK_SIZE"
 echo "preload_nchunks: $PRELOAD_NCHUNKS"
 echo "batch_size:      $BATCH_SIZE"
@@ -76,6 +80,7 @@ CMD=(python -u scripts/bench.py
     --warmup "$WARMUP"
     --repeats "$REPEATS"
     --repeat_index "$REPEAT_INDEX"
+    --zarr_backend "$ZARR_BACKEND"
     --cpu_constraint "$CPU_CONSTRAINT"
     --slurm_job_id "${SLURM_JOB_ID:-}"
     --slurm_array_job_id "${SLURM_ARRAY_JOB_ID:-}"

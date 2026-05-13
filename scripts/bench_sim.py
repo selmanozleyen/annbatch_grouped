@@ -547,7 +547,7 @@ def bench_annbatch_random(
             to_torch=False,
             rng=np.random.default_rng(seed),
         )
-        adata = _load_store_adata(store_path)
+        
         loader.add_adata(adata)
         # ANNBATCH_INDEXING_MODE is read once at annbatch import time; record what
         # was in effect for this run so plotters can pair slice/integer trials.
@@ -693,6 +693,44 @@ def bench_scdataset(
 # CLI
 # ---------------------------------------------------------------------------
 
+def _analyze_obs_size_distribution(store_path: str):
+    _header("Observation Size Analysis (Sparse NNZ)")
+    g = _open_store(store_path)
+    
+    # Load indptr to calculate NNZ per observation
+    # For Tahoe, this is ~89M entries, roughly 700MB in RAM
+    print(f"  Loading indptr from {store_path}/X/indptr ...")
+    indptr = np.asarray(g["X/indptr"])
+    nnz_per_obs = np.diff(indptr)
+    
+    # Estimate size: 4 bytes (float32 data) + 8 bytes (int64 indices) = 12 bytes per NNZ
+    bytes_per_nnz = 12
+    size_per_obs_kb = (nnz_per_obs * bytes_per_nnz) / 1024
+    
+    # Statistics
+    stats = {
+        "Mean": np.mean(size_per_obs_kb),
+        "Median": np.median(size_per_obs_kb),
+        "Min": np.min(size_per_obs_kb),
+        "Max": np.max(size_per_obs_kb),
+        "P95": np.percentile(size_per_obs_kb, 95),
+        "P99": np.percentile(size_per_obs_kb, 99),
+    }
+
+    print(f"\n  Uncompressed Size per Observation (Estimated):")
+    for k, v in stats.items():
+        unit = "MB" if v > 1024 else "KB"
+        val = v / 1024 if v > 1024 else v
+        print(f"    {k:7}: {val:10.2f} {unit}")
+
+    # Visual Distribution (ASCII Histogram)
+    print(f"\n  Distribution (KB per Obs):")
+    hist, bin_edges = np.histogram(size_per_obs_kb, bins=10)
+    max_h = max(hist)
+    for i in range(len(hist)):
+        bar = "#" * int(hist[i] / max_h * 40)
+        print(f"    [{bin_edges[i]:8.1f} - {bin_edges[i+1]:8.1f} KB]: {bar} ({hist[i]:,})")
+
 @click.command()
 @click.option(
     "--store_path",
@@ -773,7 +811,8 @@ def main(
     experiment_dir = os.path.join(output_root, experiment)
     os.makedirs(experiment_dir, exist_ok=True)
     repeat_seed = seed + repeat_index - 1
-
+    adata = _load_store_adata(store_path)
+    
     print("=" * 70)
     print("  Loader Benchmarks")
     print("=" * 70)
@@ -799,10 +838,13 @@ def main(
     if slurm_array_job_id or slurm_array_task_id:
         print(f"  slurm_array:     {slurm_array_job_id or '-'}_{slurm_array_task_id or '-'}")
     _print_source_storage_summary(store_path)
+    _analyze_obs_size_distribution(store_path)
+    return
 
     results: list[BenchmarkResult] = []
     had_failure = False
 
+    adata = _load_store_adata(store_path)
     for mode in modes:
         started_at = datetime.now().isoformat()
         try:

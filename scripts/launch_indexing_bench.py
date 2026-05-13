@@ -14,7 +14,7 @@ compute paired speedup ratios.
     chunk_size in        {1, 2, 8}            (random row, 2-row, 8-row chunks)
     batch_size           = 4096
     preload_nchunks      = 32768              (pn dominates fetch overhead)
-    repeats              = 3                  (per (cs, mode); submitted as a
+    repeats              = 5                  (per (cs, mode, zarr_backend); submitted as a
                                               Slurm array, paired across modes
                                               by repeat_index/seed)
     warmup               = 0                  (first batch is part of timing)
@@ -54,10 +54,10 @@ from pathlib import Path
 import click
 
 DEFAULT_CPU_CONSTRAINT = "intel_xeon_6248r"
-# Repeat each (cs, bs, pn, mode) three times so the plotter can build a real
+# Repeat each (cs, bs, pn, mode, zarr_backend) five times so the plotter can build a real
 # distribution per chunk_size (boxplots) and a paired speedup (slice vs integer
 # share a repeat_index, hence the same seed inside bench.py).
-DEFAULT_REPEATS = 3
+DEFAULT_REPEATS = 5
 # Drop warmup: with shuffle=True the loader's RandomSampler precomputes one
 # permutation up-front so the very first batch already contains random rows,
 # and the cold-cache cost is part of what we want to amortize. With warmup=0
@@ -88,6 +88,8 @@ DEFAULT_MAX_SAMPLES = 500_000
 # that finish their N_BATCHES under budget are unaffected.
 DEFAULT_MAX_SECONDS = 1200.0
 INDEXING_MODES = ("slice", "integer")
+ZARR_BACKENDS = ("zarr-python", "zarrs-python")
+DEFAULT_ZARR_BACKENDS = ZARR_BACKENDS
 
 
 def _floor_preload(batch_size: int, chunk_size: int) -> int:
@@ -107,12 +109,20 @@ def _preload_nchunks_for(
     return tuple(sorted({multiplier * floor for multiplier in multipliers if multiplier >= 1}))
 
 
-def _experiment_for(parent: str, chunk_size: int, preload_nchunks: int, batch_size: int, indexing_mode: str) -> str:
-    return f"{parent}__cs{chunk_size}_pn{preload_nchunks}_bs{batch_size}_{indexing_mode}"
+def _experiment_for(
+    parent: str,
+    chunk_size: int,
+    preload_nchunks: int,
+    batch_size: int,
+    indexing_mode: str,
+    zarr_backend: str,
+) -> str:
+    return f"{parent}__zb{zarr_backend}__cs{chunk_size}_pn{preload_nchunks}_bs{batch_size}_{indexing_mode}"
 
 
-def _job_name(chunk_size: int, preload_nchunks: int, batch_size: int, indexing_mode: str) -> str:
-    return f"bench_idx_{indexing_mode}_cs{chunk_size}_pn{preload_nchunks}_bs{batch_size}"[:120]
+def _job_name(chunk_size: int, preload_nchunks: int, batch_size: int, indexing_mode: str, zarr_backend: str) -> str:
+    backend = "zrs" if zarr_backend == "zarrs-python" else "zpy"
+    return f"bench_idx_{backend}_{indexing_mode}_cs{chunk_size}_pn{preload_nchunks}_bs{batch_size}"[:120]
 
 
 @click.command()
@@ -233,6 +243,13 @@ def _job_name(chunk_size: int, preload_nchunks: int, batch_size: int, indexing_m
     help=f"Indexing modes to submit. Repeat to select. Default: {INDEXING_MODES}.",
 )
 @click.option(
+    "--zarr-backend",
+    "zarr_backends",
+    type=click.Choice(ZARR_BACKENDS),
+    multiple=True,
+    help=f"Zarr codec backends to submit. Repeat to select. Default: {DEFAULT_ZARR_BACKENDS}.",
+)
+@click.option(
     "--strict/--skip-invalid",
     "strict",
     default=False,
@@ -258,6 +275,7 @@ def main(
     preload_nchunks: tuple[int, ...],
     preload_multipliers: tuple[int, ...],
     indexing_modes: tuple[str, ...],
+    zarr_backends: tuple[str, ...],
     strict: bool,
 ) -> None:
     bench_sbatch = Path(__file__).resolve().with_name("bench_indexing.sbatch")
@@ -277,6 +295,8 @@ def main(
         preload_multipliers = DEFAULT_PRELOAD_MULTIPLIERS
     if not indexing_modes:
         indexing_modes = INDEXING_MODES
+    if not zarr_backends:
+        zarr_backends = DEFAULT_ZARR_BACKENDS
     if parent_experiment is None:
         parent_experiment = datetime.now().strftime("idx_%Y%m%d_%H%M%S")
     if repeats < 1:
@@ -292,6 +312,7 @@ def main(
     batch_sizes = tuple(sorted(set(batch_sizes)))
     preload_multipliers = tuple(sorted({int(m) for m in preload_multipliers if int(m) >= 1}))
     indexing_modes = tuple(dict.fromkeys(indexing_modes))
+    zarr_backends = tuple(dict.fromkeys(zarr_backends))
 
     # Build the (cs, bs, pn) grid; partition into valid / invalid / capped buckets.
     grid: list[tuple[int, int, int]] = []
@@ -339,7 +360,7 @@ def main(
             return int(n_batches)
         return max(1, -(-int(max_samples) // int(bs)))
 
-    total_submissions = len(grid) * len(indexing_modes)
+    total_submissions = len(grid) * len(indexing_modes) * len(zarr_backends)
     derived_from_multipliers = not preload_nchunks
 
     print("=" * 72)
@@ -369,6 +390,7 @@ def main(
             print(f"    cs={cs}, bs={bs}: preload_nchunks={kept} (n_batches={_derived_n_batches(bs)})")
     print(f"  valid combos:     {len(grid)} of {len(grid) + len(invalid_grid) + len(capped_grid)}")
     print(f"  indexing modes:   {list(indexing_modes)}")
+    print(f"  zarr backends:    {list(zarr_backends)}")
     print(f"  total submits:    {total_submissions}")
     print(f"  total subjobs:    {total_submissions * repeats}")
 
@@ -397,8 +419,8 @@ def main(
     if dry_run:
         print("  (dry run, not submitting)")
 
-    def build_command(chunk_size: int, batch_size: int, preload: int, indexing_mode: str) -> list[str]:
-        experiment = _experiment_for(parent_experiment, chunk_size, preload, batch_size, indexing_mode)
+    def build_command(chunk_size: int, batch_size: int, preload: int, indexing_mode: str, zarr_backend: str) -> list[str]:
+        experiment = _experiment_for(parent_experiment, chunk_size, preload, batch_size, indexing_mode, zarr_backend)
         nb = _derived_n_batches(batch_size)
         # Empty 10th positional means "no wall-clock cap"; bench_indexing.sbatch
         # forwards it to bench.py only when non-empty.
@@ -406,7 +428,7 @@ def main(
         command = [
             "sbatch",
             f"--constraint={cpu_constraint}",
-            f"--job-name={_job_name(chunk_size, preload, batch_size, indexing_mode)}",
+            f"--job-name={_job_name(chunk_size, preload, batch_size, indexing_mode, zarr_backend)}",
             str(bench_sbatch),
             str(chunk_size),
             str(preload),
@@ -418,17 +440,19 @@ def main(
             str(batch_size),
             cpu_constraint,
             max_seconds_arg,
+            zarr_backend,
         ]
         if repeats > 1:
             command.insert(1, f"--array=1-{repeats}")
         return command
 
     for chunk_size, batch_size, preload in grid:
-        for indexing_mode in indexing_modes:
-            command = build_command(chunk_size, batch_size, preload, indexing_mode)
-            print(f"\n$ {shlex.join(command)}")
-            if not dry_run:
-                subprocess.run(command, check=True)
+        for zarr_backend in zarr_backends:
+            for indexing_mode in indexing_modes:
+                command = build_command(chunk_size, batch_size, preload, indexing_mode, zarr_backend)
+                print(f"\n$ {shlex.join(command)}")
+                if not dry_run:
+                    subprocess.run(command, check=True)
 
 
 if __name__ == "__main__":
