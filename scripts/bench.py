@@ -26,8 +26,9 @@ import numpy as np
 import scipy.sparse as sp
 import zarr
 
-from annbatch import Loader
-from annbatch.samplers import CategoricalSampler
+# annbatch imports are deferred to inside the per-mode benchmark functions so this
+# script keeps working when switching ANNBATCH_REF to branches that no longer ship
+# every helper (e.g. some branches drop CategoricalSampler).
 from annbatch_grouped.bench_utils import BenchmarkResult, benchmark_iterator, print_results_table
 from annbatch_grouped.paths import DATA_DIR, TAHOE_ZARR
 
@@ -370,11 +371,35 @@ def _run_benchmark(
     batch_size: int,
     n_batches: int,
     warmup: int,
+    max_seconds: float | None = None,
 ) -> BenchmarkResult:
     _header(title)
     t0 = time.perf_counter()
     loader, extra, summary = build_loader()
     print(f"  init {time.perf_counter() - t0:.2f}s | {summary} | RSS {_rss()}")
+
+    # Surface the torch / GPU flags the loader is actually running with. annbatch
+    # Loader stores these as private attrs; for non-annbatch loaders (e.g. scdataset
+    # via torch DataLoader) the builder may pre-populate `extra` so we don't clobber.
+    torch_mode = extra.get("torch_mode")
+    if torch_mode is None and hasattr(loader, "_to_torch"):
+        torch_mode = bool(loader._to_torch)
+    preload_to_gpu = extra.get("preload_to_gpu")
+    if preload_to_gpu is None and hasattr(loader, "_preload_to_gpu"):
+        preload_to_gpu = bool(loader._preload_to_gpu)
+    if torch_mode is not None:
+        extra.setdefault("torch_mode", torch_mode)
+    if preload_to_gpu is not None:
+        extra.setdefault("preload_to_gpu", preload_to_gpu)
+    flag_bits = []
+    if torch_mode is not None:
+        flag_bits.append(f"torch={'on' if torch_mode else 'off'}")
+    if preload_to_gpu is not None:
+        flag_bits.append(f"preload_to_gpu={'on' if preload_to_gpu else 'off'}")
+    if flag_bits:
+        print(f"  loader flags: {' | '.join(flag_bits)}")
+    if max_seconds is not None:
+        print(f"  time cap: {max_seconds:.0f}s (whichever hits first: n_batches or wall-clock)")
 
     result = benchmark_iterator(
         iter(loader),
@@ -384,6 +409,7 @@ def _run_benchmark(
         profile_name="tahoe",
         warmup_batches=warmup,
         extra=extra,
+        max_seconds=max_seconds,
     )
     print(f"  {result.summary_line()} | RSS {_rss()}")
     return result
@@ -461,7 +487,16 @@ def _read_group_slices(store_path: str, groupby_key: str) -> tuple[list[slice], 
 def bench_annbatch_random(
     store_path: str, batch_size: int, chunk_size: int,
     preload_nchunks: int, n_batches: int, warmup: int, seed: int,
+    max_seconds: float | None = None,
 ) -> BenchmarkResult:
+    try:
+        from annbatch import Loader
+    except ImportError as exc:
+        raise click.ClickException(
+            "annbatch.Loader is not importable in the active environment "
+            f"(installed at the path resolved by paths.conf). Original error: {exc}"
+        ) from exc
+
     def build_loader():
         loader = Loader(
             batch_size=batch_size,
@@ -474,7 +509,13 @@ def bench_annbatch_random(
         )
         adata = _load_store_adata(store_path)
         loader.add_adata(adata)
-        extra = {"chunk_size": chunk_size, "preload_nchunks": preload_nchunks}
+        # ANNBATCH_INDEXING_MODE is read once at annbatch import time; record what
+        # was in effect for this run so plotters can pair slice/integer trials.
+        extra = {
+            "chunk_size": chunk_size,
+            "preload_nchunks": preload_nchunks,
+            "indexing_mode": os.environ.get("ANNBATCH_INDEXING_MODE", "slice").lower(),
+        }
         summary = f"1 store, {adata.shape[0]:,} obs"
         return loader, extra, summary
 
@@ -485,13 +526,26 @@ def bench_annbatch_random(
         batch_size=batch_size,
         n_batches=n_batches,
         warmup=warmup,
+        max_seconds=max_seconds,
     )
 
 
 def bench_annbatch_categorical(
     store_path: str, groupby_key: str, batch_size: int, chunk_size: int,
     preload_nchunks: int, n_batches: int, warmup: int, seed: int,
+    max_seconds: float | None = None,
 ) -> BenchmarkResult:
+    try:
+        from annbatch import Loader
+        from annbatch.samplers import CategoricalSampler
+    except ImportError as exc:
+        raise click.ClickException(
+            "Categorical mode requires annbatch.samplers.CategoricalSampler, "
+            "which is not present on the currently installed annbatch ref. "
+            "Either install a branch that ships CategoricalSampler or run with "
+            f"--mode random / --mode scdataset only. Original error: {exc}"
+        ) from exc
+
     def build_loader():
         boundaries, labels, counts = _read_group_slices(store_path, groupby_key)
         sampler = CategoricalSampler(
@@ -519,11 +573,13 @@ def bench_annbatch_categorical(
         batch_size=batch_size,
         n_batches=n_batches,
         warmup=warmup,
+        max_seconds=max_seconds,
     )
 
 
 def bench_scdataset(
     store_path: str, groupby_key: str, batch_size: int, n_batches: int, warmup: int,
+    max_seconds: float | None = None,
 ) -> BenchmarkResult:
     try:
         scdataset_module = importlib.import_module("scdataset")
@@ -570,6 +626,11 @@ def bench_scdataset(
             "groupby_key": groupby_key,
             "sampling_strategy": "ClassBalancedSampling",
             "num_workers": 0,
+            # scdataset hands rows back through torch.utils.data.DataLoader, so the
+            # downstream consumer is on the torch path even though the fetch_callback
+            # returns numpy/sparse. Record this so plotters can compare like for like.
+            "torch_mode": True,
+            "preload_to_gpu": False,
         }
         summary = f"{counts.size} groups from {groupby_key}, {labels.size:,} obs"
         return loader, extra, summary
@@ -581,6 +642,7 @@ def bench_scdataset(
         batch_size=batch_size,
         n_batches=n_batches,
         warmup=warmup,
+        max_seconds=max_seconds,
     )
 
 
@@ -613,6 +675,15 @@ def bench_scdataset(
 @click.option("--chunk_size", type=int, default=64)
 @click.option("--preload_nchunks", type=int, default=64)
 @click.option("--n_batches", type=int, default=500)
+@click.option(
+    "--max_seconds",
+    type=float,
+    default=None,
+    help=(
+        "Optional wall-clock cap (seconds) on the timed loop. The benchmark stops "
+        "after this many seconds OR after --n_batches, whichever comes first."
+    ),
+)
 @click.option("--warmup", type=int, default=0, help="Optional warmup batches before timing.")
 @click.option("--repeats", type=int, default=1, show_default=True, help="Total repeat count recorded in metadata.")
 @click.option("--seed", type=int, default=42)
@@ -625,7 +696,7 @@ def bench_scdataset(
 @click.option("--experiment", type=str, default=None, help="Experiment name used to group run outputs.")
 def main(
     store_path, modes, groupby_key, batch_size, chunk_size, preload_nchunks,
-    n_batches, warmup, repeats, seed, cpu_constraint, repeat_index,
+    n_batches, max_seconds, warmup, repeats, seed, cpu_constraint, repeat_index,
     slurm_job_id, slurm_array_job_id, slurm_array_task_id, output_root, experiment
 ):
     if store_path is None:
@@ -657,6 +728,8 @@ def main(
     print(f"  batch_size:      {batch_size:,}")
     print(f"  chunk/preload:   {chunk_size} / {preload_nchunks}")
     print(f"  n_batches:       {n_batches:,}")
+    if max_seconds is not None:
+        print(f"  max_seconds:     {max_seconds:.0f}s")
     if warmup:
         print(f"  warmup:          {warmup}")
     print(f"  repeat:          {repeat_index}/{repeats}")
@@ -677,15 +750,18 @@ def main(
         try:
             if mode == "random":
                 result = bench_annbatch_random(
-                    store_path, batch_size, chunk_size, preload_nchunks, n_batches, warmup, repeat_seed
+                    store_path, batch_size, chunk_size, preload_nchunks, n_batches, warmup, repeat_seed,
+                    max_seconds=max_seconds,
                 )
             elif mode == "categorical":
                 result = bench_annbatch_categorical(
-                    store_path, groupby_key, batch_size, chunk_size, preload_nchunks, n_batches, warmup, repeat_seed
+                    store_path, groupby_key, batch_size, chunk_size, preload_nchunks, n_batches, warmup, repeat_seed,
+                    max_seconds=max_seconds,
                 )
             elif mode == "scdataset":
                 result = bench_scdataset(
-                    store_path, groupby_key, batch_size, n_batches, warmup
+                    store_path, groupby_key, batch_size, n_batches, warmup,
+                    max_seconds=max_seconds,
                 )
             else:
                 raise click.ClickException(f"Unsupported mode: {mode}")

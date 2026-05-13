@@ -76,10 +76,16 @@ def benchmark_iterator(
     *,
     warmup_batches: int = 5,
     extra: dict | None = None,
+    max_seconds: float | None = None,
 ) -> BenchmarkResult:
-    """Time an iterator for `n_batches` iterations, returning a BenchmarkResult.
+    """Time an iterator for at most `n_batches` iterations, returning a BenchmarkResult.
 
     The first `warmup_batches` are consumed but not counted in timing.
+
+    If `max_seconds` is given, the timed loop also stops once that many wall-clock
+    seconds have elapsed (whichever comes first). A minimum of one batch is always
+    completed so we have something to report. The actual number of batches that
+    were timed is reported in `BenchmarkResult.n_batches`.
     """
     if warmup_batches > 0:
         print(f"  Warmup: {warmup_batches} batches")
@@ -94,6 +100,7 @@ def benchmark_iterator(
     samples_seen_history = []
     batch_samples_per_sec_history = []
     samples_per_sec_history = []
+    stopped_by_time = False
     t_total = time.perf_counter()
     with tqdm(total=n_batches, desc="timed", unit="batch") as pbar:
         for i, _batch in enumerate(iterator):
@@ -112,11 +119,25 @@ def benchmark_iterator(
             pbar.set_postfix_str(f"{batch_rate:,.0f} samples/sec")
             if i + 1 >= n_batches:
                 break
+            if max_seconds is not None and elapsed >= max_seconds:
+                stopped_by_time = True
+                break
     total_time = time.perf_counter() - t_total
+    if stopped_by_time:
+        print(
+            f"  time cap reached: stopped after {len(batch_times)}/{n_batches} batches "
+            f"at {total_time:.1f}s (max_seconds={max_seconds:.1f})"
+        )
 
     actual_batches = len(batch_times)
     total_samples = actual_batches * batch_size
     samples_per_sec = total_samples / total_time if total_time > 0 else 0.0
+
+    merged_extra: dict = dict(extra or {})
+    if max_seconds is not None:
+        merged_extra.setdefault("max_seconds", float(max_seconds))
+        merged_extra.setdefault("stopped_by_time", bool(stopped_by_time))
+    merged_extra.setdefault("requested_n_batches", int(n_batches))
 
     return BenchmarkResult(
         loader_name=loader_name,
@@ -130,7 +151,7 @@ def benchmark_iterator(
         batch_samples_per_sec_history=batch_samples_per_sec_history,
         samples_per_sec_history=samples_per_sec_history,
         batch_times_s=batch_times,
-        extra=extra or {},
+        extra=merged_extra,
     )
 
 
