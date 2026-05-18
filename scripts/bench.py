@@ -36,7 +36,7 @@ if TYPE_CHECKING:
     pass
 
 ZARR_BACKENDS = ("zarr-python", "zarrs-python")
-DEFAULT_ZARR_BACKEND = "zarr-python"
+DEFAULT_ZARR_BACKEND = "zarrs-python"
 
 
 # ---------------------------------------------------------------------------
@@ -78,7 +78,7 @@ def _configure_zarr_backend(zarr_backend: str) -> None:
         zarr.config.set(
             {
                 "codec_pipeline.path": "zarrs.ZarrsCodecPipeline",
-                "codec_pipeline.strict": True,
+                "codec_pipeline.strict": False,
                 "threading.max_workers": None,
             }
         )

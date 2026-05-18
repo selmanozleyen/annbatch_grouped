@@ -1,22 +1,18 @@
-"""Launch the slice-vs-integer indexing-mode benchmark sweep.
+"""Launch the indexing benchmark sweep.
 
-For each (chunk_size, preload_nchunks) combination we submit two sbatch jobs
-on the same Slurm CPU constraint -- one with ANNBATCH_INDEXING_MODE=slice
-(the upstream default) and one with ANNBATCH_INDEXING_MODE=integer (the new
-single-OrthogonalIndexer path). Both run the random/RandomSampler benchmark
-on the Tahoe zarr (no groupby).
+For each (chunk_size, preload_nchunks) combination we submit one sbatch job on
+the requested Slurm CPU constraint. Each job runs the random/RandomSampler
+benchmark on the Tahoe zarr (no groupby).
 
 Default sweep sweeps chunk_size at a single batch_size and a single (large)
 preload_nchunks, runs each combo with multiple repeats so we can plot per
-chunk_size boxplots, and pairs slice/integer at the same seed so we can
-compute paired speedup ratios.
+chunk_size boxplots.
 
     chunk_size in        {1, 2, 8}            (random row, 2-row, 8-row chunks)
     batch_size           = 4096
     preload_nchunks      = 32768              (pn dominates fetch overhead)
-    repeats              = 5                  (per (cs, mode, zarr_backend); submitted as a
-                                              Slurm array, paired across modes
-                                              by repeat_index/seed)
+    repeats              = 5                  (per combo; submitted as a
+                                              Slurm array by repeat_index/seed)
     warmup               = 0                  (first batch is part of timing)
     max_samples          = 500_000            (~500k timed rows per repeat;
                                               forces many preload refills
@@ -29,11 +25,10 @@ to disable the cap.
 
 Each combination writes to its own experiment directory under
 
-    DATA_DIR/bench_experiments/<parent>__cs<chunk>_pn<preload>_bs<batch>_<mode>/
+    DATA_DIR/bench_experiments/<parent>__cs<chunk>_pn<preload>_bs<batch>/
 
-so plot_bench_indexing.py can pair the slice/integer trials by parsing the
-experiment name back into (chunk_size, preload_nchunks, batch_size,
-indexing_mode).
+so downstream plotting can parse the experiment name back into
+(chunk_size, preload_nchunks, batch_size).
 
 Usage:
     python scripts/launch_indexing_bench.py --dry-run
@@ -54,9 +49,8 @@ from pathlib import Path
 import click
 
 DEFAULT_CPU_CONSTRAINT = "intel_xeon_6248r"
-# Repeat each (cs, bs, pn, mode, zarr_backend) five times so the plotter can build a real
-# distribution per chunk_size (boxplots) and a paired speedup (slice vs integer
-# share a repeat_index, hence the same seed inside bench.py).
+# Repeat each (cs, bs, pn) five times so the plotter can build a real
+# distribution per chunk_size (boxplots).
 DEFAULT_REPEATS = 5
 # Drop warmup: with shuffle=True the loader's RandomSampler precomputes one
 # permutation up-front so the very first batch already contains random rows,
@@ -65,10 +59,9 @@ DEFAULT_REPEATS = 5
 DEFAULT_WARMUP = 0
 # Default sweep targets the chunk_size axis at a single, large batch_size
 # (4096) and a single, large preload_nchunks (32768). Three chunk_sizes
-# (1, 2, 8) trace how slice fetches degrade vs the integer OrthogonalIndexer
-# as each preload chunk grows. The fixed pn=32768 keeps the per-job working
-# set under ~1.2 GB of sparse data while still forcing many refills inside
-# the timed window at 500k samples.
+# (1, 2, 8) trace how fetches behave as each preload chunk grows. The fixed
+# pn=32768 keeps the per-job working set under ~1.2 GB of sparse data while
+# still forcing many refills inside the timed window at 500k samples.
 DEFAULT_CHUNK_SIZES = (1, 2, 8)
 DEFAULT_BATCH_SIZES = (4096,)
 # When neither --preload-nchunks nor --preload-multiplier is provided we use
@@ -87,9 +80,6 @@ DEFAULT_MAX_SAMPLES = 500_000
 # while still observing several preload refills even for the largest pn; runs
 # that finish their N_BATCHES under budget are unaffected.
 DEFAULT_MAX_SECONDS = 1200.0
-INDEXING_MODES = ("slice", "integer")
-ZARR_BACKENDS = ("zarr-python", "zarrs-python")
-DEFAULT_ZARR_BACKENDS = ZARR_BACKENDS
 
 
 def _floor_preload(batch_size: int, chunk_size: int) -> int:
@@ -114,15 +104,12 @@ def _experiment_for(
     chunk_size: int,
     preload_nchunks: int,
     batch_size: int,
-    indexing_mode: str,
-    zarr_backend: str,
 ) -> str:
-    return f"{parent}__zb{zarr_backend}__cs{chunk_size}_pn{preload_nchunks}_bs{batch_size}_{indexing_mode}"
+    return f"{parent}__cs{chunk_size}_pn{preload_nchunks}_bs{batch_size}"
 
 
-def _job_name(chunk_size: int, preload_nchunks: int, batch_size: int, indexing_mode: str, zarr_backend: str) -> str:
-    backend = "zrs" if zarr_backend == "zarrs-python" else "zpy"
-    return f"bench_idx_{backend}_{indexing_mode}_cs{chunk_size}_pn{preload_nchunks}_bs{batch_size}"[:120]
+def _job_name(chunk_size: int, preload_nchunks: int, batch_size: int) -> str:
+    return f"bench_idx_zrs_cs{chunk_size}_pn{preload_nchunks}_bs{batch_size}"[:120]
 
 
 @click.command()
@@ -132,7 +119,7 @@ def _job_name(chunk_size: int, preload_nchunks: int, batch_size: int, indexing_m
     "parent_experiment",
     type=str,
     default=None,
-    help="Parent experiment prefix shared by every (cs, pn, mode) combo. Defaults to idx_<timestamp>.",
+    help="Parent experiment prefix shared by every (cs, pn) combo. Defaults to idx_<timestamp>.",
 )
 @click.option(
     "--constraint",
@@ -236,20 +223,6 @@ def _job_name(chunk_size: int, preload_nchunks: int, batch_size: int, indexing_m
     ),
 )
 @click.option(
-    "--mode",
-    "indexing_modes",
-    type=click.Choice(INDEXING_MODES),
-    multiple=True,
-    help=f"Indexing modes to submit. Repeat to select. Default: {INDEXING_MODES}.",
-)
-@click.option(
-    "--zarr-backend",
-    "zarr_backends",
-    type=click.Choice(ZARR_BACKENDS),
-    multiple=True,
-    help=f"Zarr codec backends to submit. Repeat to select. Default: {DEFAULT_ZARR_BACKENDS}.",
-)
-@click.option(
     "--strict/--skip-invalid",
     "strict",
     default=False,
@@ -274,8 +247,6 @@ def main(
     chunk_sizes: tuple[int, ...],
     preload_nchunks: tuple[int, ...],
     preload_multipliers: tuple[int, ...],
-    indexing_modes: tuple[str, ...],
-    zarr_backends: tuple[str, ...],
     strict: bool,
 ) -> None:
     bench_sbatch = Path(__file__).resolve().with_name("bench_indexing.sbatch")
@@ -293,10 +264,6 @@ def main(
         preload_nchunks = DEFAULT_PRELOAD_NCHUNKS
     if not preload_multipliers:
         preload_multipliers = DEFAULT_PRELOAD_MULTIPLIERS
-    if not indexing_modes:
-        indexing_modes = INDEXING_MODES
-    if not zarr_backends:
-        zarr_backends = DEFAULT_ZARR_BACKENDS
     if parent_experiment is None:
         parent_experiment = datetime.now().strftime("idx_%Y%m%d_%H%M%S")
     if repeats < 1:
@@ -311,8 +278,6 @@ def main(
     chunk_sizes = tuple(sorted(set(chunk_sizes)))
     batch_sizes = tuple(sorted(set(batch_sizes)))
     preload_multipliers = tuple(sorted({int(m) for m in preload_multipliers if int(m) >= 1}))
-    indexing_modes = tuple(dict.fromkeys(indexing_modes))
-    zarr_backends = tuple(dict.fromkeys(zarr_backends))
 
     # Build the (cs, bs, pn) grid; partition into valid / invalid / capped buckets.
     grid: list[tuple[int, int, int]] = []
@@ -360,11 +325,11 @@ def main(
             return int(n_batches)
         return max(1, -(-int(max_samples) // int(bs)))
 
-    total_submissions = len(grid) * len(indexing_modes) * len(zarr_backends)
+    total_submissions = len(grid)
     derived_from_multipliers = not preload_nchunks
 
     print("=" * 72)
-    print("Launch indexing-mode benchmark sweep")
+    print("Launch indexing benchmark sweep")
     print("=" * 72)
     print(f"  sbatch script:    {bench_sbatch}")
     print(f"  parent:           {parent_experiment}")
@@ -389,17 +354,16 @@ def main(
             kept = [pn for pn in preloads if (max_preload_nchunks <= 0 or pn <= max_preload_nchunks) and cs * pn >= bs]
             print(f"    cs={cs}, bs={bs}: preload_nchunks={kept} (n_batches={_derived_n_batches(bs)})")
     print(f"  valid combos:     {len(grid)} of {len(grid) + len(invalid_grid) + len(capped_grid)}")
-    print(f"  indexing modes:   {list(indexing_modes)}")
-    print(f"  zarr backends:    {list(zarr_backends)}")
+    print("  zarr backend:     zarrs-python")
     print(f"  total submits:    {total_submissions}")
     print(f"  total subjobs:    {total_submissions * repeats}")
 
     # Surface combos where even the n_batches-bounded timed window cannot trigger
     # any preload refill, i.e. cs * pn >= (warmup + n_batches) * batch_size: the
     # buffer fills once in warmup and the timed run never re-enters the fetch
-    # path. These rows measure in-memory slicing, not the slice-vs-integer
-    # fetch difference. Note we cannot pre-check the wall-clock cap here because
-    # we don't know per-combo throughput ahead of time -- if max_seconds bites
+    # path. These rows mostly measure in-memory slicing rather than refill
+    # behavior. Note we cannot pre-check the wall-clock cap here because we
+    # don't know per-combo throughput ahead of time -- if max_seconds bites
     # before we finish n_batches, the run *might* still underflow, in which case
     # the resulting JSON's `extra.stopped_by_time` flag tells you to expand the
     # budget for that point.
@@ -413,26 +377,25 @@ def main(
                          for cs, bs, pn in underflow)
         print(
             f"warning: timed window does not trigger preload refills for {len(underflow)} combo(s). "
-            f"slice vs integer fetch path will not differ for these. Bump --max-samples. "
+            f"Bump --max-samples if you want refill behavior for these. "
             f"Affected: {rows}"
         )
     if dry_run:
         print("  (dry run, not submitting)")
 
-    def build_command(chunk_size: int, batch_size: int, preload: int, indexing_mode: str, zarr_backend: str) -> list[str]:
-        experiment = _experiment_for(parent_experiment, chunk_size, preload, batch_size, indexing_mode, zarr_backend)
+    def build_command(chunk_size: int, batch_size: int, preload: int) -> list[str]:
+        experiment = _experiment_for(parent_experiment, chunk_size, preload, batch_size)
         nb = _derived_n_batches(batch_size)
-        # Empty 10th positional means "no wall-clock cap"; bench_indexing.sbatch
+        # Empty 9th positional means "no wall-clock cap"; bench_indexing.sbatch
         # forwards it to bench.py only when non-empty.
         max_seconds_arg = f"{max_seconds:.0f}" if max_seconds > 0 else ""
         command = [
             "sbatch",
             f"--constraint={cpu_constraint}",
-            f"--job-name={_job_name(chunk_size, preload, batch_size, indexing_mode, zarr_backend)}",
+            f"--job-name={_job_name(chunk_size, preload, batch_size)}",
             str(bench_sbatch),
             str(chunk_size),
             str(preload),
-            indexing_mode,
             experiment,
             str(warmup),
             str(repeats),
@@ -440,19 +403,16 @@ def main(
             str(batch_size),
             cpu_constraint,
             max_seconds_arg,
-            zarr_backend,
         ]
         if repeats > 1:
             command.insert(1, f"--array=1-{repeats}")
         return command
 
     for chunk_size, batch_size, preload in grid:
-        for zarr_backend in zarr_backends:
-            for indexing_mode in indexing_modes:
-                command = build_command(chunk_size, batch_size, preload, indexing_mode, zarr_backend)
-                print(f"\n$ {shlex.join(command)}")
-                if not dry_run:
-                    subprocess.run(command, check=True)
+        command = build_command(chunk_size, batch_size, preload)
+        print(f"\n$ {shlex.join(command)}")
+        if not dry_run:
+            subprocess.run(command, check=True)
 
 
 if __name__ == "__main__":

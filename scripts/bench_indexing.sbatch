@@ -18,20 +18,18 @@ source .venv/bin/activate
 # Required positional arguments
 CHUNK_SIZE="${1:?missing chunk_size}"
 PRELOAD_NCHUNKS="${2:?missing preload_nchunks}"
-INDEXING_MODE="${3:?missing indexing_mode (slice|integer)}"
-EXPERIMENT="${4:?missing experiment}"
+EXPERIMENT="${3:?missing experiment}"
 
 # Optional positional arguments
-WARMUP="${5:-5}"
-REPEATS="${6:-1}"
-N_BATCHES="${7:-500}"
-BATCH_SIZE="${8:-4096}"
-CPU_CONSTRAINT="${9:-${SLURM_JOB_CONSTRAINTS:-}}"
-# 10th positional arg: wall-clock cap in seconds for the timed loop. Empty string
+WARMUP="${4:-5}"
+REPEATS="${5:-1}"
+N_BATCHES="${6:-500}"
+BATCH_SIZE="${7:-4096}"
+CPU_CONSTRAINT="${8:-${SLURM_JOB_CONSTRAINTS:-}}"
+# 9th positional arg: wall-clock cap in seconds for the timed loop. Empty string
 # (the default) means "no cap"; the timed loop only stops at N_BATCHES.
-MAX_SECONDS="${10:-}"
-# 11th positional arg: codec backend. zarrs-python is configured strict in bench.py.
-ZARR_BACKEND="${11:-zarr-python}"
+MAX_SECONDS="${9:-}"
+ZARR_BACKEND="zarrs-python"
 
 REPEAT_INDEX="${SLURM_ARRAY_TASK_ID:-1}"
 
@@ -40,9 +38,6 @@ if [[ "$REPEATS" -gt 1 && -z "${SLURM_ARRAY_TASK_ID:-}" ]]; then
     exit 2
 fi
 
-# This MUST be exported BEFORE running bench.py, because annbatch reads it at
-# module import time. See annbatch/loader.py::_INDEXING_MODE for details.
-export ANNBATCH_INDEXING_MODE="$INDEXING_MODE"
 export ANNBATCH_ZARR_BACKEND="$ZARR_BACKEND"
 
 echo "=== Job info ==="
@@ -57,7 +52,6 @@ echo "Node:            $(hostname)"
 echo "Started:         $(date)"
 echo "Mem alloc:       ${SLURM_MEM_PER_NODE}MB"
 echo "CPUs:            $SLURM_CPUS_PER_TASK"
-echo "Indexing mode:   $ANNBATCH_INDEXING_MODE"
 echo "Zarr backend:    $ANNBATCH_ZARR_BACKEND"
 echo "chunk_size:      $CHUNK_SIZE"
 echo "preload_nchunks: $PRELOAD_NCHUNKS"
