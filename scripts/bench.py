@@ -485,16 +485,7 @@ def _read_categorical_obs(store_path: str, groupby_key: str) -> tuple[np.ndarray
     elem = obs[groupby_key]
     if not (hasattr(elem, "keys") and "codes" in elem and "categories" in elem):
         raise ValueError(f"obs column {groupby_key!r} is not stored as categorical")
-
-    codes = np.asarray(elem["codes"], dtype=np.int64)
-    categories = [str(value) for value in np.asarray(elem["categories"]).tolist()]
-    valid = codes >= 0
-    if not np.all(valid):
-        raise ValueError(f"obs column {groupby_key!r} contains missing category codes")
-    if codes.size == 0:
-        raise ValueError(f"obs column {groupby_key!r} has no rows")
-
-    return codes, categories
+    return ad.io.read_elem(elem)
 
 
 def _read_group_labels(store_path: str, groupby_key: str) -> np.ndarray:
@@ -502,23 +493,6 @@ def _read_group_labels(store_path: str, groupby_key: str) -> np.ndarray:
     return np.asarray([categories[int(code)] for code in codes], dtype=object)
 
 
-def _read_group_slices(store_path: str, groupby_key: str) -> tuple[list[slice], list[str], np.ndarray]:
-    codes, categories = _read_categorical_obs(store_path, groupby_key)
-
-    starts = np.flatnonzero(np.r_[True, codes[1:] != codes[:-1]])
-    stops = np.r_[starts[1:], codes.size]
-    boundaries = [slice(int(start), int(stop)) for start, stop in zip(starts, stops, strict=True)]
-    group_codes = codes[starts]
-    group_labels = [str(categories[int(code)]) for code in group_codes]
-    group_counts = (stops - starts).astype(np.int64)
-
-    if len(group_labels) != len(set(group_labels)):
-        raise ValueError(
-            f"obs column {groupby_key!r} is not contiguous by category. "
-            "Expected one contiguous block per category."
-        )
-
-    return boundaries, group_labels, group_counts
 
 
 # ---------------------------------------------------------------------------
@@ -588,9 +562,9 @@ def bench_annbatch_categorical(
         ) from exc
 
     def build_loader():
-        boundaries, labels, counts = _read_group_slices(store_path, groupby_key)
+        categories = _read_categorical_obs(store_path, groupby_key)
         sampler = CategoricalSampler(
-            category_boundaries=boundaries,
+            categorical=categories,
             chunk_size=chunk_size,
             preload_nchunks=preload_nchunks,
             batch_size=batch_size,
@@ -605,7 +579,9 @@ def bench_annbatch_categorical(
             "groupby_key": groupby_key,
             "zarr_backend": _active_zarr_backend(),
         }
-        summary = f"{len(labels)} groups from {groupby_key}, {int(counts.sum()):,} obs"
+        
+        summary = f"{len(categories.categories)} groups from {groupby_key}, {categories.size:,} obs"
+        
         return loader, extra, summary
 
     return _run_benchmark(

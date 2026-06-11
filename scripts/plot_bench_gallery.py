@@ -230,7 +230,7 @@ def _aggregate_outcome_group(outcomes: list[BenchOutcome]) -> BenchOutcome:
     reason = None
     if status == "failed":
         reasons = sorted({outcome.reason for outcome in outcomes if outcome.reason})
-        reason = "; ".join(reasons) if reasons else "Unknown failure"
+        reason = _clamp_panel_error("; ".join(reasons) if reasons else "Unknown failure")
 
     if successful:
         weights = np.asarray([outcome.successful_repeats for outcome in successful], dtype=np.float64)
@@ -281,6 +281,24 @@ def _collect_outcomes(experiment_dir: Path) -> dict[tuple[str, str], BenchOutcom
         key: _aggregate_outcome_group(group)
         for key, group in grouped_outcomes.items()
     }
+
+
+def _clamp_panel_error(
+    text: str | None,
+    *,
+    max_chars: int = 100,
+    max_lines: int = 3,
+    wrap_width: int = 26,
+) -> str:
+    if not text:
+        return "unknown error"
+    cleaned = " ".join(text.replace("Observation range", "range").split())
+    cleaned = textwrap.shorten(cleaned, width=max_chars, placeholder="…")
+    lines = textwrap.wrap(cleaned, width=wrap_width)
+    if len(lines) > max_lines:
+        lines = lines[:max_lines]
+        lines[-1] = textwrap.shorten(lines[-1], width=wrap_width, placeholder="…")
+    return "\n".join(lines)
 
 
 def _lookup_outcome(outcomes: dict[tuple[str, str], BenchOutcome], groupby_key: str, mode: str) -> BenchOutcome | None:
@@ -334,8 +352,7 @@ def _plot_mode_panel(ax, outcome: BenchOutcome | None, mode: str, max_elapsed_s:
         return
 
     if outcome.status not in {"ok", "partial"} or outcome.samples_per_sec is None or not outcome.trace:
-        reason = (outcome.reason or "unknown error").replace("Observation range", "range")
-        reason = textwrap.fill(reason, width=30)
+        reason = _clamp_panel_error(outcome.reason)
         run_name = textwrap.shorten(outcome.run_path.name, width=34, placeholder="...")
         panel_text = f"FAILED\n\n{reason}\n\n{run_name}"
         ax.text(
