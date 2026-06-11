@@ -73,7 +73,7 @@ DEFAULT_MAX_PRELOAD_NCHUNKS = 65536
 # 500k timed samples per repeat is comfortably above the 32768-row preload cap,
 # so every (cs, bs) combo triggers many refills inside the timed window even
 # at cs=8 (cs*pn=262144 << 500k).
-DEFAULT_MAX_SAMPLES = 500_000
+DEFAULT_MAX_SAMPLES = 2_000_000
 # Wall-clock cap on the timed loop. With cs=1 + large pn each preload refill on
 # Tahoe takes 1-3 minutes, so a 1M-sample budget can balloon to 60+ minutes.
 # Capping at 1200s (20 min) gives every (cs, bs, pn) combo the same time budget
